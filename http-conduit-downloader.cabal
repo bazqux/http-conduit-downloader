@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.1
+version:        1.0.2
 copyright:      Vladimir Shabanov 2013
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
@@ -32,7 +32,7 @@ description:
      * Returns HTTP headers for subsequent redownloads and handles
        'Not modified' results.
     .
-     * Can be used with external DSN resolver (hsdns-cache for example).
+     * Can be used with external DNS resolver (hsdns-cache for example).
 
 source-repository head
     type:     git

@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, RecordWildCards, ViewPatterns,
-             TypeFamilies, DoAndIfThenElse, PatternGuards #-}
+             DoAndIfThenElse, PatternGuards #-}
 -- | HTTP downloader tailored for web-crawler needs.
 --
 --  * Handles all possible http-conduit exceptions and returns
@@ -20,7 +20,7 @@
 --  * Returns HTTP headers for subsequent redownloads
 --    and handles @Not modified@ results.
 --
---  * Can be used with external DSN resolver (hsdns-cache for example).
+--  * Can be used with external DNS resolver (hsdns-cache for example).
 --
 --  * Keep-alive connections pool (thanks to http-conduit).
 --
@@ -180,8 +180,8 @@ postRequest dat rq =
 
 -- | Generic version of 'download'
 -- with ability to modify http-conduit 'Request'.
-downloadG :: m ~ C.ResourceT IO
-             => (C.Request m -> m (C.Request m))
+downloadG :: -- m ~ C.ResourceT IO
+                (C.Request (C.ResourceT IO) -> C.ResourceT IO (C.Request (C.ResourceT IO)))
                 -- ^ Function to modify 'Request'
                 -- (e.g. sign or make 'postRequest')
              -> Downloader
