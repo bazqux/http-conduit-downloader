@@ -13,7 +13,9 @@
 --  * Receives data in 32k blocks internally to reduce memory fragmentation
 --    on many parallel downloads.
 --
---  * Limits total download size.
+--  * Download timeout.
+--
+--  * Total download size limit.
 --
 --  * Returns HTTP headers for subsequent redownloads
 --    and handles @Not modified@ results.

@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.0
+version:        1.0.1
 copyright:      Vladimir Shabanov 2013
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
@@ -25,7 +25,9 @@ description:
      * Receives data in 32k blocks internally to reduce memory fragmentation
        on many parallel downloads.
     .
-     * Limits total download size.
+     * Download timeout.
+    .
+     * Total download size limit.
     .
      * Returns HTTP headers for subsequent redownloads and handles
        'Not modified' results.
