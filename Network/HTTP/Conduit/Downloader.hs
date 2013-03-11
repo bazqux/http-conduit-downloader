@@ -33,7 +33,7 @@
 --  case ra of
 --      Left err -> ... -- uh oh, bad host
 --      Right ha -> do
---          ... -- cralwer politeness stuff (rate limits, domain queues)
+--          ... -- crawler politeness stuff (rate limits, domain queues)
 --          dr <- download d url (Just ha) opts
 --          case dr of
 --              DROK dat redownloadOpts ->
