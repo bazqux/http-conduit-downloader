@@ -46,7 +46,7 @@
 -- It's highly recommended to use
 -- <http://hackage.haskell.org/package/hsdns-cache>
 -- for DNS resolution since @getAddrInfo@ used in @http-conduit@ can be
--- buggy and ineffective when it needs to resolve many hosts per seconds for
+-- buggy and ineffective when it needs to resolve many hosts per second for
 -- a long time.
 --
 module Network.HTTP.Conduit.Downloader
