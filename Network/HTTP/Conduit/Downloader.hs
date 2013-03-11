@@ -227,9 +227,13 @@ downloadG f (Downloader {..}) url hostAddress opts =
                   `E.catch`
                     (return . Just . someException)
                 case r of
-                    Just (DRError e) | "EOF reached" `isSuffixOf` e && firstTime ->
+                    Just (DRError e)
+                        | ("EOF reached" `isSuffixOf` e ||
+                           e == "Invalid HTTP status line:\n"
+                          ) && firstTime ->
                         dl False
-                        -- "EOF reached" can happen on servers that fails to
+                        -- "EOF reached" or empty HTTP status line
+                        -- can happen on servers that fails to
                         -- implement HTTP/1.1 persistent connections.
                         -- Try again
                         -- https://github.com/snoyberg/http-conduit/issues/89
