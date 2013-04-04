@@ -1,12 +1,12 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, RecordWildCards, ViewPatterns,
              DoAndIfThenElse, PatternGuards #-}
+{-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 -- | HTTP downloader tailored for web-crawler needs.
 --
 --  * Handles all possible http-conduit exceptions and returns
 --    human readable error messages.
 --
---  * Handles some web server bugs (no persistent connections on HTTP/1.1,
---    returning @deflate@ data instead of @gzip@)
+--  * Handles some web server bugs (returning @deflate@ data instead of @gzip@).
 --
 --  * Ignores invalid SSL sertificates.
 --
@@ -237,6 +237,8 @@ downloadG f (Downloader {..}) url hostAddress opts =
                         -- implement HTTP/1.1 persistent connections.
                         -- Try again
                         -- https://github.com/snoyberg/http-conduit/issues/89
+                        -- Fixed in
+                        -- https://github.com/snoyberg/http-conduit/issues/117
                     _ ->
                         return $ fromMaybe (DRError "Timeout") r
         dl True
@@ -273,6 +275,8 @@ httpExceptionToDR url exn = return $ case exn of
     C.FailedConnectionException _host _port -> DRError "Connection failed"
     C.ExpectedBlankAfter100Continue -> DRError "Expected blank after 100 (Continue)"
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
+    C.NoResponseDataReceived -> DRError "No response data received"
+    C.TlsException e -> DRError $ "TLS exception:\n" ++ show e
     C.InvalidHeader h -> DRError $ "Invalid HTTP header:\n" ++ B.unpack h
     C.InternalIOException e ->
         case show e of

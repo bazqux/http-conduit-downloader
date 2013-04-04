@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.5
+version:        1.0.6
 copyright:      Vladimir Shabanov 2013
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
@@ -17,8 +17,7 @@ description:
      * Handles all possible http-conduit exceptions and returns
        human readable error messages.
     .
-     * Handles some web server bugs (no persistent connections on HTTP/1.1,
-       returning 'deflate' data instead of 'gzip')
+     * Handles some web server bugs (returning 'deflate' data instead of 'gzip').
     .
      * Ignores invalid SSL sertificates.
     .
@@ -40,7 +39,7 @@ source-repository head
 
 library
     build-depends:
-        base == 4.*, http-conduit >= 1.9, network, zlib, lifted-base,
+        base == 4.*, http-conduit >= 1.9.2.2, network, zlib, lifted-base,
         conduit, resourcet, http-types, tls, data-default, bytestring, mtl
 
     exposed-modules:
