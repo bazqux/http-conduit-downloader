@@ -328,16 +328,13 @@ sinkByteString limit = do
               case mbinp of
                   Just inp -> do
                       (acc', buf') <- liftIO $ addBs acc buf inp
---                      liftIO $ print (B.length inp)
                       let len' = len + B.length inp
                       if len' > limit then
                           return Nothing
                       else
                           go len' acc' buf'
                   Nothing -> do
---                      liftIO $ print ("len", length (buf:acc))
-                      let d = B.concat $ reverse (buf:acc)
-                      B.length d `seq` return $ Just d
+                      return $ Just $ B.concat $ reverse (buf:acc)
 
 makeDownloadResultC :: UTCTime -> String -> N.Status -> N.ResponseHeaders
                     -> B.ByteString -> DownloadResult
