@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.6
+version:        1.0.8
 copyright:      Vladimir Shabanov 2013
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
@@ -12,7 +12,7 @@ build-type:     Simple
 synopsis:       HTTP downloader tailored for web-crawler needs.
 description:
     HTTP/HTTPS downloader built on top of @http-conduit@
-    and used in <http://bazqux.com> crawler.
+    and used in <https://bazqux.com> crawler.
     .
      * Handles all possible http-conduit exceptions and returns
        human readable error messages.
@@ -39,8 +39,9 @@ source-repository head
 
 library
     build-depends:
-        base == 4.*, http-conduit >= 1.9.2.2, network, zlib, lifted-base,
-        conduit, resourcet, http-types, tls, data-default, bytestring, mtl
+        base == 4.*, http-conduit >= 1.9.4.1, network, zlib, lifted-base,
+        conduit, resourcet, http-types, tls, data-default, bytestring, mtl,
+        time, old-locale
 
     exposed-modules:
         Network.HTTP.Conduit.Downloader

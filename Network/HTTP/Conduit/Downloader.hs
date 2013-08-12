@@ -85,6 +85,10 @@ import System.Timeout.Lifted
 import Codec.Compression.Zlib.Raw as Deflate
 import Network.URI
 -- import ADNS.Cache
+import Data.Time.Format
+import System.Locale
+import Data.Time.Clock
+import Data.Time.Clock.POSIX
 
 -- | Result of 'download' operation.
 data DownloadResult
@@ -214,11 +218,12 @@ downloadG f (Downloader {..}) url hostAddress opts =
                            sinkByteString (dsMaxDownloadSize settings)
 --                    liftIO $ print ("sink", mbb)
                     case mbb of
-                        Just b ->
+                        Just b -> do
                             let c = C.responseStatus r
                                 h = C.responseHeaders r
-                                d = tryDeflate h b in
-                            return $ makeDownloadResultC url c h d
+                                d = tryDeflate h b
+                            curTime <- liftIO $ getCurrentTime
+                            return $ makeDownloadResultC curTime url c h d
                         Nothing -> return $ DRError "Too much data")
                   `E.catch`
                     (fmap Just . httpExceptionToDR url)
@@ -263,7 +268,8 @@ downloadG f (Downloader {..}) url hostAddress opts =
 httpExceptionToDR :: Monad m => String -> C.HttpException -> m DownloadResult
 httpExceptionToDR url exn = return $ case exn of
     C.StatusCodeException c h _ -> -- trace "exception" $
-                                 makeDownloadResultC url c h ""
+                                 makeDownloadResultC
+                                 (posixSecondsToUTCTime 0) url c h ""
     C.InvalidUrlException _ e -> DRError $ "Invalid URL: " ++ e
     C.TooManyRedirects _ -> DRError "Too many redirects"
     C.UnparseableRedirect _ -> DRError "Unparseable redirect"
@@ -283,6 +289,8 @@ httpExceptionToDR url exn = return $ case exn of
             "<<timeout>>" -> DRError "Timeout"
             s -> DRError s
     C.ProxyConnectException {..} -> DRError "Can't connect to proxy"
+    C.ResponseBodyTooShort _ _ -> DRError "Response body too short"
+    C.InvalidChunkHeaders -> DRError "Invalid chunk headers"
 
 bufSize :: Int
 bufSize = 32 * 1024 - overhead -- Copied from Data.ByteString.Lazy.
@@ -331,9 +339,9 @@ sinkByteString limit = do
                       let d = B.concat $ reverse (buf:acc)
                       B.length d `seq` return $ Just d
 
-makeDownloadResultC :: String -> N.Status -> N.ResponseHeaders
+makeDownloadResultC :: UTCTime -> String -> N.Status -> N.ResponseHeaders
                     -> B.ByteString -> DownloadResult
-makeDownloadResultC url c headers b = do
+makeDownloadResultC curTime url c headers b = do
     if N.statusCode c == 304 then
         DRNotModified
     else if N.statusCode c `elem`
@@ -356,16 +364,30 @@ makeDownloadResultC url c headers b = do
         DRError $ "HTTP " ++ show (N.statusCode c) ++ " "
                     ++ B.unpack (N.statusMessage c)
     else
-        DROK b (redownloadOpts headers)
+        DROK b (redownloadOpts [] headers)
     where redirect r
               | r == url = DRError $ "HTTP redirect to the same url?"
               | otherwise = DRRedirect r
-          redownloadOpts [] = []
-          redownloadOpts (("ETag", tag):xs) =
-              ("If-None-Match: " ++ B.unpack tag) : redownloadOpts xs
-          redownloadOpts (("Last-Modified", time):xs) =
-              ("If-Modified-Since: " ++ B.unpack time) : redownloadOpts xs
-          redownloadOpts (_:xs) = redownloadOpts xs
+          redownloadOpts acc [] = reverse acc
+          redownloadOpts _ (("Pragma", B.map toLower -> tag) : _)
+              | "no-cache" `B.isInfixOf` tag = []
+          redownloadOpts _ (("Cache-Control", B.map toLower -> tag) : _)
+              | any (`B.isInfixOf` tag)
+                ["no-cache", "no-store", "must-revalidate", "max-age=0"] = []
+          redownloadOpts acc (("Expires", time):xs)
+              | ts <- B.unpack time
+              , Just t <- parseHttpTime ts
+              , t > curTime =
+                   redownloadOpts acc xs
+              | otherwise = [] -- expires is non-valid or in the past
+          redownloadOpts acc (("ETag", tag):xs) =
+              redownloadOpts (("If-None-Match: " ++ B.unpack tag) : acc) xs
+          redownloadOpts acc (("Last-Modified", time):xs)
+              | ts <- B.unpack time
+              , Just t <- parseHttpTime ts
+              , t <= curTime = -- use only valid timestamps
+              redownloadOpts (("If-Modified-Since: " ++ B.unpack time) : acc) xs
+          redownloadOpts acc (_:xs) = redownloadOpts acc xs
           relUri r =
               fromMaybe r $
               fmap (($ "") . uriToString id) $
@@ -373,6 +395,22 @@ makeDownloadResultC url c headers b = do
                   (parseURIReference $ trim r)
                   (parseURI url)
           trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+
+-- fmap utcTimeToPOSIXSeconds $
+
+tryParseTime :: [String] -> String -> Maybe UTCTime
+tryParseTime formats string =
+    foldr mplus Nothing $
+    map (\ fmt -> parseTime defaultTimeLocale fmt (trimString string)) formats
+    where trimString = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+
+parseHttpTime :: String -> Maybe UTCTime
+parseHttpTime =
+    tryParseTime
+    ["%a, %e %b %Y %k:%M:%S %Z" -- Sun, 06 Nov 1994 08:49:37 GMT
+    ,"%A, %e-%b-%y %k:%M:%S %Z" -- Sunday, 06-Nov-94 08:49:37 GMT
+    ,"%a %b %e %k:%M:%S %Y"     -- Sun Nov  6 08:49:37 1994
+    ]
 
 -- | Download single URL with default 'DownloaderSettings'.
 -- Fails if result is not 'DROK'.
