@@ -363,7 +363,7 @@ makeDownloadResultC curTime url c headers b = do
     else
         DROK b (redownloadOpts [] headers)
     where redirect r
-              | r == url = DRError $ "HTTP redirect to the same url?"
+--              | r == url = DRError $ "HTTP redirect to the same url?"
               | otherwise = DRRedirect r
           redownloadOpts acc [] = reverse acc
           redownloadOpts _ (("Pragma", B.map toLower -> tag) : _)
