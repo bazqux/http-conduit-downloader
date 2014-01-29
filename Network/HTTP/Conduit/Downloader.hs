@@ -69,7 +69,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Internal as B
 import Control.Monad
 import qualified Control.Exception as E
-import Data.Default
+import Data.Default as C
 import Data.String
 import Data.Char
 import Data.Maybe
@@ -79,6 +79,7 @@ import qualified Network.Socket as NS
 import qualified Network.TLS as TLS
 import qualified Network.HTTP.Types as N
 import qualified Network.HTTP.Conduit as C
+import qualified Network.Connection as C
 import qualified Control.Monad.Trans.Resource as C
 import qualified Data.Conduit as C
 import System.Timeout.Lifted
@@ -129,8 +130,9 @@ instance Default DownloaderSettings where
         { dsUserAgent = "Mozilla/5.0 (compatible; HttpConduitDownloader/1.0; +http://hackage.haskell.org/package/http-conduit-downloader)"
         , dsTimeout = 30
         , dsManagerSettings =
-            C.def { C.managerCheckCerts =
-                        \ _ _ _ -> return TLS.CertificateUsageAccept }
+            C.mkManagerSettings (C.TLSSettingsSimple True False False) Nothing
+--             C.def { C.managerCheckCerts =
+--                         \ _ _ _ -> return TLS.CertificateUsageAccept }
         , dsMaxDownloadSize = 10*1024*1024
         }
 
@@ -159,7 +161,7 @@ withDownloaderSettings s f = C.runResourceT $ do
     (_, m) <- C.allocate (C.newManager $ dsManagerSettings s) C.closeManager
     liftIO $ f (Downloader m s)
 
-parseUrl :: String -> Either C.HttpException (C.Request a)
+parseUrl :: String -> Either C.HttpException C.Request
 parseUrl = C.parseUrl . takeWhile (/= '#')
 
 -- | Perform download
@@ -177,7 +179,7 @@ post d url ha dat =
     downloadG (return . postRequest dat) d url ha []
 
 -- | Make HTTP POST request.
-postRequest :: B.ByteString -> C.Request a -> C.Request b
+postRequest :: B.ByteString -> C.Request -> C.Request
 postRequest dat rq =
     rq { C.method = N.methodPost
        , C.requestBody = C.RequestBodyBS dat }
@@ -185,7 +187,7 @@ postRequest dat rq =
 -- | Generic version of 'download'
 -- with ability to modify http-conduit 'Request'.
 downloadG :: -- m ~ C.ResourceT IO
-                (C.Request (C.ResourceT IO) -> C.ResourceT IO (C.Request (C.ResourceT IO)))
+                (C.Request -> C.ResourceT IO C.Request)
                 -- ^ Function to modify 'Request'
                 -- (e.g. sign or make 'postRequest')
              -> Downloader
@@ -250,8 +252,12 @@ downloadG f (Downloader {..}) url hostAddress opts =
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
                        (fromString a, fromString (tail b))
+          handshakeFailed (TLS.Terminated _ e tlsError) =
+              DRError $ "SSL terminated:\n" ++ show tlsError
           handshakeFailed (TLS.HandshakeFailed tlsError) =
-              DRError $ "SSL error:\n" ++ show tlsError
+              DRError $ "SSL handshake failed:\n" ++ show tlsError
+          handshakeFailed TLS.ConnectionNotEstablished =
+              DRError $ "SSL connection not established"
           someException :: E.SomeException -> DownloadResult
           someException e = case show e of
               "<<timeout>>" -> DRError "Timeout"
@@ -291,6 +297,8 @@ httpExceptionToDR url exn = return $ case exn of
     C.ProxyConnectException {..} -> DRError "Can't connect to proxy"
     C.ResponseBodyTooShort _ _ -> DRError "Response body too short"
     C.InvalidChunkHeaders -> DRError "Invalid chunk headers"
+    C.TlsNotSupported -> DRError "TLS not supported"
+    C.IncompleteHeaders -> DRError "Incomplete headers"
 
 bufSize :: Int
 bufSize = 32 * 1024 - overhead -- Copied from Data.ByteString.Lazy.
