@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, RecordWildCards, ViewPatterns,
-             DoAndIfThenElse, PatternGuards #-}
+             DoAndIfThenElse, PatternGuards, ScopedTypeVariables #-}
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 -- | HTTP downloader tailored for web-crawler needs.
 --
@@ -79,7 +79,8 @@ import qualified Network.Socket as NS
 import qualified Network.TLS as TLS
 import qualified Network.HTTP.Types as N
 import qualified Network.HTTP.Conduit as C
-import qualified Network.Connection as C
+import qualified Network.Connection as NC
+import Network.HTTP.Client.Internal (makeConnection, Connection)
 import qualified Control.Monad.Trans.Resource as C
 import qualified Data.Conduit as C
 import System.Timeout.Lifted
@@ -90,6 +91,7 @@ import Data.Time.Format
 import System.Locale
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
+import System.IO
 
 -- | Result of 'download' operation.
 data DownloadResult
@@ -130,11 +132,68 @@ instance Default DownloaderSettings where
         { dsUserAgent = "Mozilla/5.0 (compatible; HttpConduitDownloader/1.0; +http://hackage.haskell.org/package/http-conduit-downloader)"
         , dsTimeout = 30
         , dsManagerSettings =
-            C.mkManagerSettings (C.TLSSettingsSimple True False False) Nothing
+            (C.mkManagerSettings tls Nothing)
+            { C.managerTlsConnection =
+              -- IO (Maybe HostAddress -> String -> Int -> IO Connection)
+              getTlsConnection (Just tls)
+            }
 --             C.def { C.managerCheckCerts =
 --                         \ _ _ _ -> return TLS.CertificateUsageAccept }
         , dsMaxDownloadSize = 10*1024*1024
         }
+        where tls = NC.TLSSettingsSimple True False False
+
+-- Network.HTTP.Client.TLS.getTlsConnection with ability to use HostAddress
+-- since Network.Connection.connectTo uses Network.connectTo that uses
+-- getHostByName (passed HostAddress is ignored)
+getTlsConnection :: Maybe NC.TLSSettings
+--                 -> Maybe NC.SockSettings
+                 -> IO (Maybe NS.HostAddress -> String -> Int -> IO Connection)
+getTlsConnection tls = do
+    context <- NC.initConnectionContext
+    return $ \ mbha host port -> do
+        cf <- case mbha of
+            Nothing -> return $ NC.connectTo context
+            Just ha -> do
+                handle <- openSocketHandle ha port
+                return $ NC.connectFromHandle context handle
+        conn <- cf $ NC.ConnectionParams
+            { NC.connectionHostname = host
+            , NC.connectionPort = fromIntegral port
+            , NC.connectionUseSecure = tls
+            , NC.connectionUseSocks = Nothing -- sock
+            }
+        convertConnection conn
+  where
+    convertConnection conn = makeConnection
+        (NC.connectionGetChunk conn)
+        (NC.connectionPut conn)
+        -- Closing an SSL connection gracefully involves writing/reading
+        -- on the socket.  But when this is called the socket might be
+        -- already closed, and we get a @ResourceVanished@.
+        (NC.connectionClose conn `E.catch` \(_ :: E.IOException) -> return ())
+
+-- slightly modified Network.HTTP.Client.Connection.openSocketConnection
+openSocketHandle :: NS.HostAddress
+                 -> Int -- ^ port
+                 -> IO Handle
+openSocketHandle ha port = do
+    let addr = NS.AddrInfo
+               { NS.addrFlags = []
+               , NS.addrFamily = NS.AF_INET
+               , NS.addrSocketType = NS.Stream
+               , NS.addrProtocol = 6 -- tcp
+               , NS.addrAddress = NS.SockAddrInet (toEnum port) ha
+               , NS.addrCanonName = Nothing
+               }
+    E.bracketOnError
+        (NS.socket (NS.addrFamily addr) (NS.addrSocketType addr)
+                   (NS.addrProtocol addr))
+        (NS.sClose)
+        (\sock -> do
+            NS.setSocketOption sock NS.NoDelay 1
+            NS.connect sock (NS.addrAddress addr)
+            NS.socketToHandle sock ReadWriteMode)
 
 -- | Keeps http-conduit 'Manager' and 'DownloaderSettings'.
 data Downloader
