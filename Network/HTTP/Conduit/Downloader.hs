@@ -252,6 +252,7 @@ data Downloader
 -- | Create a 'Downloader' with settings.
 newDownloader :: DownloaderSettings -> IO Downloader
 newDownloader s = do
+    SSL.withOpenSSL $ return () -- init in case it wasn't initialized yet
     m <- C.newManager $ dsManagerSettings s
     return $ Downloader m s
 
