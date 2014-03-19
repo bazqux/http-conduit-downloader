@@ -6,7 +6,10 @@
 --  * Handles all possible http-conduit exceptions and returns
 --    human readable error messages.
 --
---  * Handles some web server bugs (returning @deflate@ data instead of @gzip@).
+--  * Handles some web server bugs (returning @deflate@ data instead of @gzip@,
+--    invalid @gzip encoding).
+--
+--  * Uses OpenSSL instead of tls package since it doesn't handle all sites.
 --
 --  * Ignores invalid SSL sertificates.
 --
@@ -76,10 +79,12 @@ import Data.Maybe
 import Data.List
 import Foreign
 import qualified Network.Socket as NS
-import qualified Network.TLS as TLS
+-- import qualified Network.TLS as TLS
+-- import qualified Network.Connection as NC
+import qualified OpenSSL as SSL
+import qualified OpenSSL.Session as SSL
 import qualified Network.HTTP.Types as N
 import qualified Network.HTTP.Conduit as C
-import qualified Network.Connection as NC
 import Network.HTTP.Client.Internal (makeConnection, Connection)
 import qualified Control.Monad.Trans.Resource as C
 import qualified Data.Conduit as C
@@ -132,60 +137,92 @@ instance Default DownloaderSettings where
         { dsUserAgent = "Mozilla/5.0 (compatible; HttpConduitDownloader/1.0; +http://hackage.haskell.org/package/http-conduit-downloader)"
         , dsTimeout = 30
         , dsManagerSettings =
-            (C.mkManagerSettings tls Nothing)
+            C.conduitManagerSettings
             { C.managerTlsConnection =
               -- IO (Maybe HostAddress -> String -> Int -> IO Connection)
-              getTlsConnection (Just tls)
+              getOpenSSLConnection
             }
+--             (C.mkManagerSettings tls Nothing)
+--             { C.managerTlsConnection =
+--               -- IO (Maybe HostAddress -> String -> Int -> IO Connection)
+--               getTlsConnection (Just tls)
+--             }
 --             C.def { C.managerCheckCerts =
 --                         \ _ _ _ -> return TLS.CertificateUsageAccept }
         , dsMaxDownloadSize = 10*1024*1024
         }
-        where tls = NC.TLSSettingsSimple True False False
+--        where tls = NC.TLSSettingsSimple True False False
+
+-- tls package doesn't handle some sites:
+-- https://github.com/vincenthz/hs-tls/issues/53
+-- using OpenSSL instead
+getOpenSSLConnection :: IO (Maybe NS.HostAddress -> String -> Int
+                            -> IO Connection)
+getOpenSSLConnection = do
+    ctx <- SSL.context
+    return $ \ mbha host port -> do
+        sock <- case mbha of
+            Nothing -> openSocketByName host port
+            Just ha -> openSocket ha port
+        ssl <- SSL.connection ctx sock
+        SSL.connect ssl
+        makeConnection
+            (SSL.read ssl bufSize)
+            (SSL.write ssl)
+            -- Closing an SSL connection gracefully involves writing/reading
+            -- on the socket.  But when this is called the socket might be
+            -- already closed, and we get a @ResourceVanished@.
+            (NS.sClose sock `E.catch` \(_ :: E.IOException) -> return ())
+--            ((SSL.shutdown ssl SSL.Bidirectional >> return ()) `E.catch` \(_ :: E.IOException) -> return ())
+-- segmentation fault in GHCi with SSL.shutdown / tryShutdown SSL.Unidirectional
+-- hang with SSL.Bidirectional
 
 -- Network.HTTP.Client.TLS.getTlsConnection with ability to use HostAddress
 -- since Network.Connection.connectTo uses Network.connectTo that uses
 -- getHostByName (passed HostAddress is ignored)
-getTlsConnection :: Maybe NC.TLSSettings
---                 -> Maybe NC.SockSettings
-                 -> IO (Maybe NS.HostAddress -> String -> Int -> IO Connection)
-getTlsConnection tls = do
-    context <- NC.initConnectionContext
-    return $ \ mbha host port -> do
-        cf <- case mbha of
-            Nothing -> return $ NC.connectTo context
-            Just ha -> do
-                handle <- openSocketHandle ha port
-                return $ NC.connectFromHandle context handle
-        conn <- cf $ NC.ConnectionParams
-            { NC.connectionHostname = host
-            , NC.connectionPort = fromIntegral port
-            , NC.connectionUseSecure = tls
-            , NC.connectionUseSocks = Nothing -- sock
-            }
-        convertConnection conn
-  where
-    convertConnection conn = makeConnection
-        (NC.connectionGetChunk conn)
-        (NC.connectionPut conn)
-        -- Closing an SSL connection gracefully involves writing/reading
-        -- on the socket.  But when this is called the socket might be
-        -- already closed, and we get a @ResourceVanished@.
-        (NC.connectionClose conn `E.catch` \(_ :: E.IOException) -> return ())
+-- getTlsConnection :: Maybe NC.TLSSettings
+-- --                 -> Maybe NC.SockSettings
+--                  -> IO (Maybe NS.HostAddress -> String -> Int -> IO Connection)
+-- getTlsConnection tls = do
+--     context <- NC.initConnectionContext
+--     return $ \ mbha host port -> do
+--         cf <- case mbha of
+--             Nothing -> return $ NC.connectTo context
+--             Just ha -> do
+--                 sock <- openSocket ha port
+--                 handle <- NS.socketToHandle sock ReadWriteMode
+--                 return $ NC.connectFromHandle context handle
+--         conn <- cf $ NC.ConnectionParams
+--             { NC.connectionHostname = host
+--             , NC.connectionPort = fromIntegral port
+--             , NC.connectionUseSecure = tls
+--             , NC.connectionUseSocks = Nothing -- sock
+--             }
+--         convertConnection conn
+--   where
+--     convertConnection conn = makeConnection
+--         (NC.connectionGetChunk conn)
+--         (NC.connectionPut conn)
+--         -- Closing an SSL connection gracefully involves writing/reading
+--         -- on the socket.  But when this is called the socket might be
+--         -- already closed, and we get a @ResourceVanished@.
+--         (NC.connectionClose conn `E.catch` \(_ :: E.IOException) -> return ())
 
 -- slightly modified Network.HTTP.Client.Connection.openSocketConnection
-openSocketHandle :: NS.HostAddress
-                 -> Int -- ^ port
-                 -> IO Handle
-openSocketHandle ha port = do
-    let addr = NS.AddrInfo
-               { NS.addrFlags = []
-               , NS.addrFamily = NS.AF_INET
-               , NS.addrSocketType = NS.Stream
-               , NS.addrProtocol = 6 -- tcp
-               , NS.addrAddress = NS.SockAddrInet (toEnum port) ha
-               , NS.addrCanonName = Nothing
-               }
+openSocket :: NS.HostAddress
+           -> Int -- ^ port
+           -> IO NS.Socket
+openSocket ha port =
+    openSocket' $
+        NS.AddrInfo
+        { NS.addrFlags = []
+        , NS.addrFamily = NS.AF_INET
+        , NS.addrSocketType = NS.Stream
+        , NS.addrProtocol = 6 -- tcp
+        , NS.addrAddress = NS.SockAddrInet (toEnum port) ha
+        , NS.addrCanonName = Nothing
+        }
+openSocket' addr = do
     E.bracketOnError
         (NS.socket (NS.addrFamily addr) (NS.addrSocketType addr)
                    (NS.addrProtocol addr))
@@ -193,7 +230,17 @@ openSocketHandle ha port = do
         (\sock -> do
             NS.setSocketOption sock NS.NoDelay 1
             NS.connect sock (NS.addrAddress addr)
-            NS.socketToHandle sock ReadWriteMode)
+            return sock)
+
+openSocketByName host port = do
+    let hints = NS.defaultHints
+                { NS.addrFlags = []-- [NS.AI_ADDRCONFIG, NS.AI_NUMERICSERV]
+                , NS.addrFamily = NS.AF_INET
+                , NS.addrSocketType = NS.Stream
+                , NS.addrProtocol = 6 -- tcp
+                }
+    (addrInfo:_) <- NS.getAddrInfo (Just hints) (Just host) (Just $ show port)
+    openSocket' addrInfo
 
 -- | Keeps http-conduit 'Manager' and 'DownloaderSettings'.
 data Downloader
@@ -216,7 +263,7 @@ withDownloader = withDownloaderSettings def
 -- | Create a new 'Downloader' with provided settings,
 -- use it in the provided function, and then release it.
 withDownloaderSettings :: DownloaderSettings -> (Downloader -> IO a) -> IO a
-withDownloaderSettings s f = C.runResourceT $ do
+withDownloaderSettings s f = SSL.withOpenSSL $ C.runResourceT $ do
     (_, m) <- C.allocate (C.newManager $ dsManagerSettings s) C.closeManager
     liftIO $ f (Downloader m s)
 
@@ -271,8 +318,11 @@ downloadG f (Downloader {..}) url hostAddress opts =
                        -- headers.
                      , C.hostAddress = hostAddress
                      }
+            disableCompression rq =
+                rq { C.requestHeaders =
+                       ("Accept-Encoding", "") : C.requestHeaders rq }
         req <- C.runResourceT $ f rq1
-        let dl firstTime = do
+        let dl req firstTime = do
                 r <- C.runResourceT (timeout (dsTimeout settings * 1000000) $ do
                     r <- C.http req manager
                     mbb <- C.responseBody r C.$$+-
@@ -288,8 +338,8 @@ downloadG f (Downloader {..}) url hostAddress opts =
                         Nothing -> return $ DRError "Too much data")
                   `E.catch`
                     (fmap Just . httpExceptionToDR url)
-                  `E.catch`
-                    (return . Just . handshakeFailed)
+--                   `E.catch`
+--                     (return . Just . handshakeFailed)
                   `E.catch`
                     (return . Just . someException)
                 case r of
@@ -297,7 +347,7 @@ downloadG f (Downloader {..}) url hostAddress opts =
                         | ("EOF reached" `isSuffixOf` e ||
                            e == "Invalid HTTP status line:\n"
                           ) && firstTime ->
-                        dl False
+                            dl req False
                         -- "EOF reached" or empty HTTP status line
                         -- can happen on servers that fails to
                         -- implement HTTP/1.1 persistent connections.
@@ -305,18 +355,22 @@ downloadG f (Downloader {..}) url hostAddress opts =
                         -- https://github.com/snoyberg/http-conduit/issues/89
                         -- Fixed in
                         -- https://github.com/snoyberg/http-conduit/issues/117
+                        | "ZlibException" `isPrefixOf` e && firstTime ->
+                            -- some sites return junk instead of gzip data.
+                            -- retrying without compression
+                            dl (disableCompression req) False
                     _ ->
                         return $ fromMaybe (DRError "Timeout") r
-        dl True
+        dl req True
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
                        (fromString a, fromString (tail b))
-          handshakeFailed (TLS.Terminated _ e tlsError) =
-              DRError $ "SSL terminated:\n" ++ show tlsError
-          handshakeFailed (TLS.HandshakeFailed tlsError) =
-              DRError $ "SSL handshake failed:\n" ++ show tlsError
-          handshakeFailed TLS.ConnectionNotEstablished =
-              DRError $ "SSL connection not established"
+--           handshakeFailed (TLS.Terminated _ e tlsError) =
+--               DRError $ "SSL terminated:\n" ++ show tlsError
+--           handshakeFailed (TLS.HandshakeFailed tlsError) =
+--               DRError $ "SSL handshake failed:\n" ++ show tlsError
+--           handshakeFailed TLS.ConnectionNotEstablished =
+--               DRError $ "SSL connection not established"
           someException :: E.SomeException -> DownloadResult
           someException e = case show e of
               "<<timeout>>" -> DRError "Timeout"
@@ -324,8 +378,7 @@ downloadG f (Downloader {..}) url hostAddress opts =
           tryDeflate headers b
               | Just d <- lookup "Content-Encoding" headers
               , B.map toLower d == "deflate"
-                  = B.concat $ BL.toChunks $ Deflate.decompress $
-                    BL.fromChunks [b]
+                  = BL.toStrict $ Deflate.decompress $ BL.fromStrict b
               | otherwise = b
 
 
