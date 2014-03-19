@@ -345,8 +345,9 @@ downloadG f (Downloader {..}) url hostAddress opts =
                     (return . Just . someException)
                 case r of
                     Just (DRError e)
-                        | ("EOF reached" `isSuffixOf` e ||
-                           e == "Invalid HTTP status line:\n"
+                        | ("EOF reached" `isSuffixOf` e
+                           || e == "Invalid HTTP status line:\n"
+                           || e == "Incomplete headers"
                           ) && firstTime ->
                             dl req False
                         -- "EOF reached" or empty HTTP status line
