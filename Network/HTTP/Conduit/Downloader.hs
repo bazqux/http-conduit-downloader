@@ -167,7 +167,10 @@ getOpenSSLConnection = do
         ssl <- SSL.connection ctx sock
         SSL.connect ssl
         makeConnection
-            (SSL.read ssl bufSize)
+            (SSL.read ssl bufSize
+             `E.catch`
+             \ (_ :: SSL.ConnectionAbruptlyTerminated) -> return ""
+            )
             (SSL.write ssl)
             -- Closing an SSL connection gracefully involves writing/reading
             -- on the socket.  But when this is called the socket might be
