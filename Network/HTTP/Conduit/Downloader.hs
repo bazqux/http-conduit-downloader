@@ -510,7 +510,9 @@ makeDownloadResultC curTime url c headers b = do
               , t <= curTime = -- use only valid timestamps
               redownloadOpts (("If-Modified-Since: " ++ B.unpack time) : acc) xs
           redownloadOpts acc (_:xs) = redownloadOpts acc xs
-          relUri r =
+          fixNonAscii =
+              escapeURIString (\ c -> ord c <= 0x7f && c `notElem` " []{}|")
+          relUri (fixNonAscii -> r) =
               fromMaybe r $
               fmap (($ "") . uriToString id) $
               liftM2 relativeTo
