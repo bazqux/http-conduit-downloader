@@ -271,7 +271,7 @@ withDownloaderSettings s f = SSL.withOpenSSL $ C.runResourceT $ do
     (_, m) <- C.allocate (C.newManager $ dsManagerSettings s) C.closeManager
     liftIO $ f (Downloader m s)
 
-parseUrl :: String -> Either C.HttpException C.Request
+parseUrl :: String -> Either E.SomeException C.Request
 parseUrl = C.parseUrl . takeWhile (/= '#')
 
 -- | Perform download
@@ -307,7 +307,9 @@ downloadG :: -- m ~ C.ResourceT IO
              -> IO DownloadResult
 downloadG f (Downloader {..}) url hostAddress opts =
   case parseUrl url of
-    Left e -> httpExceptionToDR url e
+    Left e ->
+        maybe (return $ DRError $ show e) (httpExceptionToDR url)
+              (E.fromException e)
     Right rq -> do
         let rq1 = rq { C.requestHeaders =
                                [("Accept", "*/*")
@@ -402,6 +404,9 @@ httpExceptionToDR url exn = return $ case exn of
     C.OverlongHeaders -> DRError "Overlong HTTP headers"
     C.ResponseTimeout -> DRError "Timeout"
     C.FailedConnectionException _host _port -> DRError "Connection failed"
+    C.FailedConnectionException2 _ _ _ _ -> DRError "Connection failed"
+    C.InvalidDestinationHost _ -> DRError "Invalid destination host"
+    C.HttpZlibException e -> DRError $ "Zlib exception " ++ show e
     C.ExpectedBlankAfter100Continue -> DRError "Expected blank after 100 (Continue)"
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
     C.NoResponseDataReceived -> DRError "No response data received"

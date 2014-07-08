@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.18
+version:        1.0.19
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
 homepage:       https://github.com/bazqux/http-conduit-downloader
@@ -41,7 +41,7 @@ source-repository head
 
 library
     build-depends:
-        base == 4.*, http-conduit >= 2.0.0.4, http-client, connection, network, zlib, lifted-base,
+        base == 4.*, http-conduit >= 2.1.2.3, http-client >= 0.3.4, connection, network, zlib, lifted-base,
         conduit, resourcet, http-types, data-default, bytestring, mtl,
         time, old-locale, HsOpenSSL
 
