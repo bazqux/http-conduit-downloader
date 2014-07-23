@@ -406,7 +406,7 @@ httpExceptionToDR url exn = return $ case exn of
     C.FailedConnectionException _host _port -> DRError "Connection failed"
     C.FailedConnectionException2 _ _ _ _ -> DRError "Connection failed"
     C.InvalidDestinationHost _ -> DRError "Invalid destination host"
-    C.HttpZlibException e -> DRError $ "Zlib exception " ++ show e
+    C.HttpZlibException e -> DRError $ show e
     C.ExpectedBlankAfter100Continue -> DRError "Expected blank after 100 (Continue)"
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
     C.NoResponseDataReceived -> DRError "No response data received"
@@ -516,14 +516,14 @@ makeDownloadResultC curTime url c headers b = do
               redownloadOpts (("If-Modified-Since: " ++ B.unpack time) : acc) xs
           redownloadOpts acc (_:xs) = redownloadOpts acc xs
           fixNonAscii =
-              escapeURIString (\ c -> ord c <= 0x7f && c `notElem` " []{}|")
+              escapeURIString (\ c -> ord c <= 0x7f && c `notElem` " []{}|\"") .
+              trimString
           relUri (fixNonAscii -> r) =
               fromMaybe r $
               fmap (($ "") . uriToString id) $
               liftM2 relativeTo
-                  (parseURIReference $ trim r)
-                  (parseURI url)
-          trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+                  (parseURIReference r)
+                  (parseURI $ fixNonAscii url)
 
 -- fmap utcTimeToPOSIXSeconds $
 
@@ -531,7 +531,8 @@ tryParseTime :: [String] -> String -> Maybe UTCTime
 tryParseTime formats string =
     foldr mplus Nothing $
     map (\ fmt -> parseTime defaultTimeLocale fmt (trimString string)) formats
-    where trimString = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+
+trimString = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 
 parseHttpTime :: String -> Maybe UTCTime
 parseHttpTime =
