@@ -126,7 +126,7 @@ data DownloaderSettings
         -- ^ Conduit 'Manager' settings.
         -- Default: ManagerSettings with SSL certificate checks removed.
       , dsMaxDownloadSize :: Int
-        -- ^ Download size limit. Default: 10MB.
+        -- ^ Download size limit in bytes. Default: 10MB.
       }
 -- http://wiki.apache.org/nutch/OptimizingCrawls
 -- use 10 seconds as default timeout (too small).
