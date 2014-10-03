@@ -42,7 +42,7 @@ source-repository head
 library
     build-depends:
         base == 4.*, http-conduit >= 2.1.2.3, http-client >= 0.3.4, connection, network, zlib, lifted-base,
-        conduit, resourcet, http-types, data-default, bytestring, mtl,
+        conduit, resourcet, http-types, data-default, bytestring, mtl, network-uri,
         time, old-locale, HsOpenSSL
 
     exposed-modules:
