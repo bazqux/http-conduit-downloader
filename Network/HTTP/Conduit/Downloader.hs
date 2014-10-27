@@ -404,7 +404,7 @@ httpExceptionToDR url exn = return $ case exn of
     C.OverlongHeaders -> DRError "Overlong HTTP headers"
     C.ResponseTimeout -> DRError "Timeout"
     C.FailedConnectionException _host _port -> DRError "Connection failed"
-    C.FailedConnectionException2 _ _ _ _ -> DRError "Connection failed"
+    C.FailedConnectionException2 _ _ _ exn -> DRError $ "Connection failed: " ++ show exn
     C.InvalidDestinationHost _ -> DRError "Invalid destination host"
     C.HttpZlibException e -> DRError $ show e
     C.ExpectedBlankAfter100Continue -> DRError "Expected blank after 100 (Continue)"
