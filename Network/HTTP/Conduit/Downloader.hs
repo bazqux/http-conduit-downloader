@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, RecordWildCards, ViewPatterns,
-             DoAndIfThenElse, PatternGuards, ScopedTypeVariables #-}
+             DoAndIfThenElse, PatternGuards, ScopedTypeVariables,
+             TupleSections #-}
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 -- | HTTP downloader tailored for web-crawler needs.
 --
@@ -109,6 +110,16 @@ data DownloadResult
     | DRNotModified
       -- ^ HTTP 304 Not Modified
     deriving (Show, Read, Eq)
+
+-- | Result of 'rawDownload' operation.
+data RawDownloadResult
+    = RawDownloadResult
+      { rdrStatus :: N.Status
+      , rdrHttpVersion :: N.HttpVersion
+      , rdrHeaders :: N.ResponseHeaders
+      , rdrBody :: B.ByteString
+      }
+    deriving (Show, Eq)
 
 -- | @If-None-Match@ and/or @If-Modified-Since@ headers.
 type DownloadOptions = [String]
@@ -304,10 +315,25 @@ downloadG :: -- m ~ C.ResourceT IO
              -> String -- ^ URL
              -> Maybe NS.HostAddress -- ^ Optional resolved 'HostAddress'
              -> DownloadOptions
-             -> IO DownloadResult
-downloadG f (Downloader {..}) url hostAddress opts =
+             -> IO (DownloadResult)
+downloadG f d u h o = fmap fst $ rawDownload f d u h o
+
+-- | Even more generic version of 'download', which returns 'RawDownloadResult'.
+-- 'RawDownloadResult' is optional since it can not be determined on timeouts
+-- and connection errors.
+rawDownload :: -- m ~ C.ResourceT IO
+                (C.Request -> C.ResourceT IO C.Request)
+                -- ^ Function to modify 'Request'
+                -- (e.g. sign or make 'postRequest')
+             -> Downloader
+             -> String -- ^ URL
+             -> Maybe NS.HostAddress -- ^ Optional resolved 'HostAddress'
+             -> DownloadOptions
+             -> IO (DownloadResult, Maybe RawDownloadResult)
+rawDownload f (Downloader {..}) url hostAddress opts =
   case parseUrl url of
     Left e ->
+        fmap (, Nothing) $
         maybe (return $ DRError $ show e) (httpExceptionToDR url)
               (E.fromException e)
     Right rq -> do
@@ -323,6 +349,7 @@ downloadG f (Downloader {..}) url hostAddress opts =
                        -- while http-conduit timeouts only when waits for
                        -- headers.
                      , C.hostAddress = hostAddress
+                     , C.checkStatus = \ _ _ _ -> Nothing
                      }
             disableCompression rq =
                 rq { C.requestHeaders =
@@ -340,16 +367,23 @@ downloadG f (Downloader {..}) url hostAddress opts =
                                 h = C.responseHeaders r
                                 d = tryDeflate h b
                             curTime <- liftIO $ getCurrentTime
-                            return $ makeDownloadResultC curTime url c h d
-                        Nothing -> return $ DRError "Too much data")
+                            return
+                                (makeDownloadResultC curTime url c h d
+                                , Just $ RawDownloadResult
+                                  { rdrStatus = c
+                                  , rdrHttpVersion = C.responseVersion r
+                                  , rdrHeaders = h
+                                  , rdrBody = d
+                                  })
+                        Nothing -> return (DRError "Too much data", Nothing))
                   `E.catch`
-                    (fmap Just . httpExceptionToDR url)
+                    (fmap (Just . (, Nothing)) . httpExceptionToDR url)
 --                   `E.catch`
 --                     (return . Just . handshakeFailed)
                   `E.catch`
-                    (return . Just . someException)
+                    (return . (Just . (, Nothing)) . someException)
                 case r of
-                    Just (DRError e)
+                    Just (DRError e, _)
                         | ("EOF reached" `isSuffixOf` e
                            || e == "Invalid HTTP status line:\n"
                            || e == "Incomplete headers"
@@ -367,7 +401,7 @@ downloadG f (Downloader {..}) url hostAddress opts =
                             -- retrying without compression
                             dl (disableCompression req) False
                     _ ->
-                        return $ fromMaybe (DRError "Timeout") r
+                        return $ fromMaybe (DRError "Timeout", Nothing) r
         dl req True
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
