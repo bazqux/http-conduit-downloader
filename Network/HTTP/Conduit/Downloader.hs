@@ -56,8 +56,8 @@
 module Network.HTTP.Conduit.Downloader
     ( -- * Download operations
       urlGetContents, urlGetContentsPost
-    , download, post, downloadG
-    , DownloadResult(..), DownloadOptions
+    , download, post, downloadG, rawDownload
+    , DownloadResult(..), RawDownloadResult(..), DownloadOptions
 
       -- * Downloader
     , DownloaderSettings(..)
@@ -455,6 +455,7 @@ httpExceptionToDR url exn = return $ case exn of
     C.InvalidChunkHeaders -> DRError "Invalid chunk headers"
     C.TlsNotSupported -> DRError "TLS not supported"
     C.IncompleteHeaders -> DRError "Incomplete headers"
+    C.InvalidProxyEnvironmentVariable n v -> DRError $ "Invalid proxy environment variable " ++ show n ++ "=" ++ show v
 
 bufSize :: Int
 bufSize = 32 * 1024 - overhead -- Copied from Data.ByteString.Lazy.
