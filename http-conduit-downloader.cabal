@@ -39,20 +39,11 @@ source-repository head
     type:     git
     location: https://github.com/bazqux/http-conduit-downloader
 
-flag network-uri
-    description: Get Network.URI from the network-uri package
-    default: True
-
 library
     build-depends:
         base == 4.*, http-conduit >= 2.1.5, http-client >= 0.4.7, connection, zlib, lifted-base,
         conduit, resourcet, http-types, data-default, bytestring, mtl,
-        time, old-locale, HsOpenSSL
-
-    if flag(network-uri)
-        build-depends: network-uri >= 2.6, network >= 2.6
-    else
-        build-depends: network-uri < 2.6, network < 2.6
+        time, old-locale, HsOpenSSL, network-uri >= 2.6, network >= 2.6
 
     exposed-modules:
         Network.HTTP.Conduit.Downloader
