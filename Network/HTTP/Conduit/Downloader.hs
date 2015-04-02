@@ -8,13 +8,13 @@
 --    human readable error messages.
 --
 --  * Handles some web server bugs (returning @deflate@ data instead of @gzip@,
---    invalid @gzip encoding).
+--    invalid @gzip@ encoding).
 --
---  * Uses OpenSSL instead of tls package since it doesn't handle all sites.
+--  * Uses OpenSSL instead of @tls@ package (since @tls@ doesn't handle all sites).
 --
 --  * Ignores invalid SSL sertificates.
 --
---  * Receives data in 32k blocks internally to reduce memory fragmentation
+--  * Receives data in 32k chunks internally to reduce memory fragmentation
 --    on many parallel downloads.
 --
 --  * Download timeout.
@@ -37,10 +37,10 @@
 --  case ra of
 --      Left err -> ... -- uh oh, bad host
 --      Right ha -> do
---          ... -- crawler politeness stuff (rate limits, domain queues)
+--          ... -- crawler politeness stuff (rate limits, queues)
 --          dr <- download d url (Just ha) opts
 --          case dr of
---              DROK dat redownloadOpts ->
+--              DROK dat redownloadOptions ->
 --                  ... -- analyze data, save redownloadOpts for next download
 --              DRRedirect .. -> ...
 --              DRNotModified -> ...
@@ -48,7 +48,8 @@
 --  @
 --
 -- It's highly recommended to use
--- <http://hackage.haskell.org/package/hsdns-cache>
+-- <http://hackage.haskell.org/package/concurrent-dns-cache>
+-- (preferably with single resolver pointing to locally running BIND)
 -- for DNS resolution since @getAddrInfo@ used in @http-conduit@ can be
 -- buggy and ineffective when it needs to resolve many hosts per second for
 -- a long time.
@@ -118,6 +119,7 @@ data RawDownloadResult
       , rdrHttpVersion :: N.HttpVersion
       , rdrHeaders :: N.ResponseHeaders
       , rdrBody :: B.ByteString
+      , rdrCookieJar :: C.CookieJar
       }
     deriving (Show, Eq)
 
@@ -374,6 +376,7 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                   , rdrHttpVersion = C.responseVersion r
                                   , rdrHeaders = h
                                   , rdrBody = d
+                                  , rdrCookieJar = C.responseCookieJar r
                                   })
                         Nothing -> return (DRError "Too much data", Nothing))
                   `E.catch`
