@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.25
+version:        1.0.26
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
 homepage:       https://github.com/bazqux/http-conduit-downloader

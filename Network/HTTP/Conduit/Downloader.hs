@@ -173,11 +173,16 @@ getOpenSSLConnection :: IO (Maybe NS.HostAddress -> String -> Int
                             -> IO Connection)
 getOpenSSLConnection = do
     ctx <- SSL.context
+--     SSL.contextSetCiphers ctx "DEFAULT"
+--     SSL.contextSetVerificationMode ctx SSL.VerifyNone
+--     SSL.contextAddOption ctx SSL.SSL_OP_NO_SSLv3
+--     SSL.contextAddOption ctx SSL.SSL_OP_ALL
     return $ \ mbha host port -> do
         sock <- case mbha of
             Nothing -> openSocketByName host port
             Just ha -> openSocket ha port
         ssl <- SSL.connection ctx sock
+        SSL.setTlsextHostName ssl host
         SSL.connect ssl
         makeConnection
             (SSL.read ssl bufSize
