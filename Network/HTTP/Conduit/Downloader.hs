@@ -95,7 +95,6 @@ import Codec.Compression.Zlib.Raw as Deflate
 import Network.URI
 -- import ADNS.Cache
 import Data.Time.Format
-import System.Locale
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
 import System.IO
@@ -150,7 +149,7 @@ instance Default DownloaderSettings where
         { dsUserAgent = "Mozilla/5.0 (compatible; HttpConduitDownloader/1.0; +http://hackage.haskell.org/package/http-conduit-downloader)"
         , dsTimeout = 30
         , dsManagerSettings =
-            C.conduitManagerSettings
+            C.tlsManagerSettings
             { C.managerTlsConnection =
               -- IO (Maybe HostAddress -> String -> Int -> IO Connection)
               getOpenSSLConnection
@@ -285,9 +284,7 @@ withDownloader = withDownloaderSettings def
 -- | Create a new 'Downloader' with provided settings,
 -- use it in the provided function, and then release it.
 withDownloaderSettings :: DownloaderSettings -> (Downloader -> IO a) -> IO a
-withDownloaderSettings s f = SSL.withOpenSSL $ C.runResourceT $ do
-    (_, m) <- C.allocate (C.newManager $ dsManagerSettings s) C.closeManager
-    liftIO $ f (Downloader m s)
+withDownloaderSettings s f = f =<< newDownloader s
 
 parseUrl :: String -> Either E.SomeException C.Request
 parseUrl = C.parseUrl . takeWhile (/= '#')
@@ -458,12 +455,13 @@ httpExceptionToDR url exn = return $ case exn of
         case show e of
             "<<timeout>>" -> DRError "Timeout"
             s -> DRError s
-    C.ProxyConnectException {..} -> DRError "Can't connect to proxy"
+    C.ProxyConnectException _ _ _ -> DRError "Can't connect to proxy"
     C.ResponseBodyTooShort _ _ -> DRError "Response body too short"
     C.InvalidChunkHeaders -> DRError "Invalid chunk headers"
     C.TlsNotSupported -> DRError "TLS not supported"
     C.IncompleteHeaders -> DRError "Incomplete headers"
     C.InvalidProxyEnvironmentVariable n v -> DRError $ "Invalid proxy environment variable " ++ show n ++ "=" ++ show v
+    C.ResponseLengthAndChunkingBothUsed -> DRError "Response-Length and chunking both used"
 
 bufSize :: Int
 bufSize = 32 * 1024 - overhead -- Copied from Data.ByteString.Lazy.
@@ -559,7 +557,8 @@ makeDownloadResultC curTime url c headers b = do
               redownloadOpts (("If-Modified-Since: " ++ B.unpack time) : acc) xs
           redownloadOpts acc (_:xs) = redownloadOpts acc xs
           fixNonAscii =
-              escapeURIString (\ c -> ord c <= 0x7f && c `notElem` " []{}|\"") .
+              escapeURIString
+                  (\ c -> ord c <= 0x7f && c `notElem` (" []{}|\"" :: String)) .
               trimString
           relUri (fixNonAscii -> r) =
               fromMaybe r $
@@ -573,7 +572,8 @@ makeDownloadResultC curTime url c headers b = do
 tryParseTime :: [String] -> String -> Maybe UTCTime
 tryParseTime formats string =
     foldr mplus Nothing $
-    map (\ fmt -> parseTime defaultTimeLocale fmt (trimString string)) formats
+    map (\ fmt -> parseTimeM True defaultTimeLocale fmt (trimString string))
+        formats
 
 trimString = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 
