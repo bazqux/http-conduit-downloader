@@ -97,7 +97,6 @@ import Network.URI
 import Data.Time.Format
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
-import System.IO
 
 -- | Result of 'download' operation.
 data DownloadResult
@@ -242,6 +241,7 @@ openSocket ha port =
         , NS.addrAddress = NS.SockAddrInet (toEnum port) ha
         , NS.addrCanonName = Nothing
         }
+openSocket' :: NS.AddrInfo -> IO NS.Socket
 openSocket' addr = do
     E.bracketOnError
         (NS.socket (NS.addrFamily addr) (NS.addrSocketType addr)
@@ -252,6 +252,7 @@ openSocket' addr = do
             NS.connect sock (NS.addrAddress addr)
             return sock)
 
+openSocketByName :: Show a => NS.HostName -> a -> IO NS.Socket
 openSocketByName host port = do
     let hints = NS.defaultHints
                 { NS.addrFlags = []-- [NS.AI_ADDRCONFIG, NS.AI_NUMERICSERV]
@@ -341,24 +342,6 @@ rawDownload f (Downloader {..}) url hostAddress opts =
         maybe (return $ DRError $ show e) (httpExceptionToDR url)
               (E.fromException e)
     Right rq -> do
-        let rq1 = rq { C.requestHeaders =
-                               [("Accept", "*/*")
-                               ,("User-Agent", dsUserAgent settings)
-                               ]
-                               ++ map toHeader opts
-                               ++ C.requestHeaders rq
-                     , C.redirectCount = 0
-                     , C.responseTimeout = Nothing
-                       -- We have timeout for connect and downloading
-                       -- while http-conduit timeouts only when waits for
-                       -- headers.
-                     , C.hostAddress = hostAddress
-                     , C.checkStatus = \ _ _ _ -> Nothing
-                     }
-            disableCompression rq =
-                rq { C.requestHeaders =
-                       ("Accept-Encoding", "") : C.requestHeaders rq }
-        req <- C.runResourceT $ f rq1
         let dl req firstTime = do
                 r <- C.runResourceT (timeout (dsTimeout settings * 1000000) $ do
                     r <- C.http req manager
@@ -407,6 +390,24 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                             dl (disableCompression req) False
                     _ ->
                         return $ fromMaybe (DRError "Timeout", Nothing) r
+            disableCompression req =
+                req { C.requestHeaders =
+                          ("Accept-Encoding", "") : C.requestHeaders req }
+            rq1 = rq { C.requestHeaders =
+                               [("Accept", "*/*")
+                               ,("User-Agent", dsUserAgent settings)
+                               ]
+                               ++ map toHeader opts
+                               ++ C.requestHeaders rq
+                     , C.redirectCount = 0
+                     , C.responseTimeout = Nothing
+                       -- We have timeout for connect and downloading
+                       -- while http-conduit timeouts only when waits for
+                       -- headers.
+                     , C.hostAddress = hostAddress
+                     , C.checkStatus = \ _ _ _ -> Nothing
+                     }
+        req <- C.runResourceT $ f rq1
         dl req True
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
@@ -443,13 +444,15 @@ httpExceptionToDR url exn = return $ case exn of
     C.OverlongHeaders -> DRError "Overlong HTTP headers"
     C.ResponseTimeout -> DRError "Timeout"
     C.FailedConnectionException _host _port -> DRError "Connection failed"
-    C.FailedConnectionException2 _ _ _ exn -> DRError $ "Connection failed: " ++ show exn
+    C.FailedConnectionException2 _ _ _ e -> DRError $ "Connection failed: " ++ show e
     C.InvalidDestinationHost _ -> DRError "Invalid destination host"
     C.HttpZlibException e -> DRError $ show e
     C.ExpectedBlankAfter100Continue -> DRError "Expected blank after 100 (Continue)"
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
     C.NoResponseDataReceived -> DRError "No response data received"
     C.TlsException e -> DRError $ "TLS exception:\n" ++ show e
+    C.TlsExceptionHostPort e h p -> DRError $
+        "TLS exception (" ++ B.unpack h ++ ":" ++ show p ++ "):\n" ++ show e
     C.InvalidHeader h -> DRError $ "Invalid HTTP header:\n" ++ B.unpack h
     C.InternalIOException e ->
         case show e of
@@ -558,7 +561,7 @@ makeDownloadResultC curTime url c headers b = do
           redownloadOpts acc (_:xs) = redownloadOpts acc xs
           fixNonAscii =
               escapeURIString
-                  (\ c -> ord c <= 0x7f && c `notElem` (" []{}|\"" :: String)) .
+                  (\ x -> ord x <= 0x7f && x `notElem` (" []{}|\"" :: String)) .
               trimString
           relUri (fixNonAscii -> r) =
               fromMaybe r $
@@ -575,6 +578,7 @@ tryParseTime formats string =
     map (\ fmt -> parseTimeM True defaultTimeLocale fmt (trimString string))
         formats
 
+trimString :: String -> String
 trimString = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 
 parseHttpTime :: String -> Maybe UTCTime
