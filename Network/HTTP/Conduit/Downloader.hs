@@ -191,7 +191,7 @@ getOpenSSLConnection = do
             -- Closing an SSL connection gracefully involves writing/reading
             -- on the socket.  But when this is called the socket might be
             -- already closed, and we get a @ResourceVanished@.
-            (NS.sClose sock `E.catch` \(_ :: E.IOException) -> return ())
+            (NS.close sock `E.catch` \(_ :: E.IOException) -> return ())
 --            ((SSL.shutdown ssl SSL.Bidirectional >> return ()) `E.catch` \(_ :: E.IOException) -> return ())
 -- segmentation fault in GHCi with SSL.shutdown / tryShutdown SSL.Unidirectional
 -- hang with SSL.Bidirectional
@@ -246,7 +246,7 @@ openSocket' addr = do
     E.bracketOnError
         (NS.socket (NS.addrFamily addr) (NS.addrSocketType addr)
                    (NS.addrProtocol addr))
-        (NS.sClose)
+        (NS.close)
         (\sock -> do
             NS.setSocketOption sock NS.NoDelay 1
             NS.connect sock (NS.addrAddress addr)
@@ -288,7 +288,7 @@ withDownloaderSettings :: DownloaderSettings -> (Downloader -> IO a) -> IO a
 withDownloaderSettings s f = f =<< newDownloader s
 
 parseUrl :: String -> Either E.SomeException C.Request
-parseUrl = C.parseUrl . takeWhile (/= '#')
+parseUrl = C.parseRequest . takeWhile (/= '#')
 
 -- | Perform download
 download  ::    Downloader
@@ -400,24 +400,18 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                ++ map toHeader opts
                                ++ C.requestHeaders rq
                      , C.redirectCount = 0
-                     , C.responseTimeout = Nothing
+                     , C.responseTimeout = C.responseTimeoutNone
                        -- We have timeout for connect and downloading
                        -- while http-conduit timeouts only when waits for
                        -- headers.
                      , C.hostAddress = hostAddress
-                     , C.checkStatus = \ _ _ _ -> Nothing
+                     , C.checkResponse = \ _ _ -> return ()
                      }
         req <- C.runResourceT $ f rq1
         dl req True
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
                        (fromString a, fromString (tail b))
---           handshakeFailed (TLS.Terminated _ e tlsError) =
---               DRError $ "SSL terminated:\n" ++ show tlsError
---           handshakeFailed (TLS.HandshakeFailed tlsError) =
---               DRError $ "SSL handshake failed:\n" ++ show tlsError
---           handshakeFailed TLS.ConnectionNotEstablished =
---               DRError $ "SSL connection not established"
           someException :: E.SomeException -> DownloadResult
           someException e = case show e of
               "<<timeout>>" -> DRError "Timeout"
@@ -428,43 +422,45 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                   = BL.toStrict $ Deflate.decompress $ BL.fromStrict b
               | otherwise = b
 
-
-
 httpExceptionToDR :: Monad m => String -> C.HttpException -> m DownloadResult
 httpExceptionToDR url exn = return $ case exn of
-    C.StatusCodeException c h _ -> -- trace "exception" $
-                                 makeDownloadResultC
-                                 (posixSecondsToUTCTime 0) url c h ""
+    C.HttpExceptionRequest rq ec -> httpExceptionContentToDR url ec
     C.InvalidUrlException _ e -> DRError $ "Invalid URL: " ++ e
+
+httpExceptionContentToDR :: String -> C.HttpExceptionContent -> DownloadResult
+httpExceptionContentToDR url ec = case ec of
+    C.StatusCodeException r b ->
+      makeDownloadResultC (posixSecondsToUTCTime 0) url
+      (C.responseStatus r) (C.responseHeaders r) b
     C.TooManyRedirects _ -> DRError "Too many redirects"
-    C.UnparseableRedirect _ -> DRError "Unparseable redirect"
-    C.TooManyRetries -> DRError "Too many retries"
-    C.HttpParserException e -> DRError $ "HTTP parser error: " ++ e
-    C.HandshakeFailed -> DRError "Handshake failed"
     C.OverlongHeaders -> DRError "Overlong HTTP headers"
     C.ResponseTimeout -> DRError "Timeout"
-    C.FailedConnectionException _host _port -> DRError "Connection failed"
-    C.FailedConnectionException2 _ _ _ e -> DRError $ "Connection failed: " ++ show e
-    C.InvalidDestinationHost _ -> DRError "Invalid destination host"
-    C.HttpZlibException e -> DRError $ show e
-    C.ExpectedBlankAfter100Continue -> DRError "Expected blank after 100 (Continue)"
+    C.ConnectionTimeout -> DRError "Connection timeout"
+    C.ConnectionFailure e -> DRError $ "Connection failed: " ++ show e
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
-    C.NoResponseDataReceived -> DRError "No response data received"
-    C.TlsException e -> DRError $ "TLS exception:\n" ++ show e
-    C.TlsExceptionHostPort e h p -> DRError $
-        "TLS exception (" ++ B.unpack h ++ ":" ++ show p ++ "):\n" ++ show e
     C.InvalidHeader h -> DRError $ "Invalid HTTP header:\n" ++ B.unpack h
-    C.InternalIOException e ->
+    C.InternalException e ->
         case show e of
             "<<timeout>>" -> DRError "Timeout"
             s -> DRError s
     C.ProxyConnectException _ _ _ -> DRError "Can't connect to proxy"
-    C.ResponseBodyTooShort _ _ -> DRError "Response body too short"
-    C.InvalidChunkHeaders -> DRError "Invalid chunk headers"
+    C.NoResponseDataReceived -> DRError "No response data received"
     C.TlsNotSupported -> DRError "TLS not supported"
+    C.WrongRequestBodyStreamSize e a ->
+        DRError $ "The request body provided did not match the expected size "
+        ++ ea e a
+    C.ResponseBodyTooShort e a -> DRError $ "Response body too short " ++ ea e a
+    C.InvalidChunkHeaders -> DRError "Invalid chunk headers"
     C.IncompleteHeaders -> DRError "Incomplete headers"
-    C.InvalidProxyEnvironmentVariable n v -> DRError $ "Invalid proxy environment variable " ++ show n ++ "=" ++ show v
-    C.ResponseLengthAndChunkingBothUsed -> DRError "Response-Length and chunking both used"
+    C.InvalidDestinationHost _ -> DRError "Invalid destination host"
+    C.HttpZlibException e -> DRError $ show e
+    C.InvalidProxyEnvironmentVariable n v ->
+        DRError $ "Invalid proxy environment variable "
+        ++ show n ++ "=" ++ show v
+    C.ConnectionClosed -> DRError "Connection closed"
+    where ea expected actual =
+              "(expected " ++ show expected ++ " bytes, actual is "
+              ++ show actual ++ " bytes)"
 
 bufSize :: Int
 bufSize = 32 * 1024 - overhead -- Copied from Data.ByteString.Lazy.
