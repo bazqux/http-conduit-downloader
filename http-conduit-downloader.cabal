@@ -41,7 +41,7 @@ source-repository head
 
 library
     build-depends:
-        base >= 4.8.0.0, http-conduit >= 2.2.0, http-client >= 0.5.0, connection, zlib, lifted-base,
+        base == 4.*, http-conduit >= 2.2.0, http-client >= 0.5.0, connection, zlib, lifted-base,
         conduit, resourcet, http-types, data-default, bytestring, mtl,
         time >= 1.5.0, HsOpenSSL >= 0.11.2, network-uri >= 2.6, network >= 2.6
 
