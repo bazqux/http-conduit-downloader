@@ -424,7 +424,7 @@ rawDownload f (Downloader {..}) url hostAddress opts =
 
 httpExceptionToDR :: Monad m => String -> C.HttpException -> m DownloadResult
 httpExceptionToDR url exn = return $ case exn of
-    C.HttpExceptionRequest rq ec -> httpExceptionContentToDR url ec
+    C.HttpExceptionRequest _ ec -> httpExceptionContentToDR url ec
     C.InvalidUrlException _ e -> DRError $ "Invalid URL: " ++ e
 
 httpExceptionContentToDR :: String -> C.HttpExceptionContent -> DownloadResult
