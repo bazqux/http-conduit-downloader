@@ -69,6 +69,7 @@ module Network.HTTP.Conduit.Downloader
     ) where
 
 import Control.Monad.Trans
+import qualified Data.Text as T
 import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Internal as B
@@ -90,7 +91,7 @@ import qualified Network.HTTP.Conduit as C
 import Network.HTTP.Client.Internal (makeConnection, Connection)
 import qualified Control.Monad.Trans.Resource as C
 import qualified Data.Conduit as C
-import System.Timeout.Lifted
+import System.Timeout
 import Codec.Compression.Zlib.Raw as Deflate
 import Network.URI
 -- import ADNS.Cache
@@ -343,9 +344,9 @@ rawDownload f (Downloader {..}) url hostAddress opts =
               (E.fromException e)
     Right rq -> do
         let dl req firstTime = do
-                r <- C.runResourceT (timeout (dsTimeout settings * 1000000) $ do
+                r <- (timeout (dsTimeout settings * 1000000) $ C.runResourceT $ do
                     r <- C.http req manager
-                    mbb <- C.responseBody r C.$$+-
+                    mbb <- C.sealConduitT (C.responseBody r) C.$$+-
                            sinkByteString (dsMaxDownloadSize settings)
 --                    liftIO $ print ("sink", mbb)
                     case mbb of
@@ -457,6 +458,7 @@ httpExceptionContentToDR url ec = case ec of
     C.InvalidProxyEnvironmentVariable n v ->
         DRError $ "Invalid proxy environment variable "
         ++ show n ++ "=" ++ show v
+    C.InvalidProxySettings s -> DRError $ "Invalid proxy settings:\n" ++ T.unpack s
     C.ConnectionClosed -> DRError "Connection closed"
     where ea expected actual =
               "(expected " ++ show expected ++ " bytes, actual is "
@@ -489,7 +491,7 @@ addBs acc (B.PS bfp _ bl) (B.PS sfp offs sl) = do
 
 -- | Sink data using 32k buffers to reduce memory fragmentation.
 -- Returns 'Nothing' if downloaded too much data.
-sinkByteString :: MonadIO m => Int -> C.Sink B.ByteString m (Maybe B.ByteString)
+sinkByteString :: MonadIO m => Int -> C.ConduitT B.ByteString C.Void m (Maybe B.ByteString)
 sinkByteString limit = do
     buf <- liftIO $ newBuf
     go 0 [] buf
