@@ -120,7 +120,7 @@ data RawDownloadResult
       , rdrBody :: B.ByteString
       , rdrCookieJar :: C.CookieJar
       }
-    deriving (Show, Eq)
+    deriving Show
 
 -- | @If-None-Match@ and/or @If-Modified-Since@ headers.
 type DownloadOptions = [String]
@@ -346,25 +346,39 @@ rawDownload f (Downloader {..}) url hostAddress opts =
         let dl req firstTime = do
                 r <- (timeout (dsTimeout settings * 1000000) $ C.runResourceT $ do
                     r <- C.http req manager
-                    mbb <- C.sealConduitT (C.responseBody r) C.$$+-
-                           sinkByteString (dsMaxDownloadSize settings)
+                    let s = C.responseStatus r
+                        h = C.responseHeaders r
+                        rdr d =
+                            RawDownloadResult
+                            { rdrStatus = s
+                            , rdrHttpVersion = C.responseVersion r
+                            , rdrHeaders = h
+                            , rdrBody = d
+                            , rdrCookieJar = C.responseCookieJar r
+                            }
+                        readLen = B.foldl' (\ a d -> a * 10 + ord d - ord '0') 0
+                    mbb <- case lookup "Content-Length" h of
+                        Just l
+                            | B.all (\ c -> c >= '0' && c <= '9') l
+                              && not (B.null l)
+                              && readLen l > dsMaxDownloadSize settings
+                            -> do
+                               -- liftIO $ putStrLn "Content-Length too large"
+                               return Nothing
+                               -- no reason to download body
+                        _ ->
+                            C.sealConduitT (C.responseBody r) C.$$+-
+                                sinkByteString (dsMaxDownloadSize settings)
 --                    liftIO $ print ("sink", mbb)
                     case mbb of
                         Just b -> do
-                            let c = C.responseStatus r
-                                h = C.responseHeaders r
-                                d = tryDeflate h b
+                            let d = tryDeflate h b
                             curTime <- liftIO $ getCurrentTime
                             return
-                                (makeDownloadResultC curTime url c h d
-                                , Just $ RawDownloadResult
-                                  { rdrStatus = c
-                                  , rdrHttpVersion = C.responseVersion r
-                                  , rdrHeaders = h
-                                  , rdrBody = d
-                                  , rdrCookieJar = C.responseCookieJar r
-                                  })
-                        Nothing -> return (DRError "Too much data", Nothing))
+                                (makeDownloadResultC curTime url s h d
+                                , Just $ rdr d)
+                        Nothing ->
+                            return (DRError "Too much data", Just $ rdr ""))
                   `E.catch`
                     (fmap (Just . (, Nothing)) . httpExceptionToDR url)
 --                   `E.catch`
@@ -426,7 +440,9 @@ rawDownload f (Downloader {..}) url hostAddress opts =
 httpExceptionToDR :: Monad m => String -> C.HttpException -> m DownloadResult
 httpExceptionToDR url exn = return $ case exn of
     C.HttpExceptionRequest _ ec -> httpExceptionContentToDR url ec
-    C.InvalidUrlException _ e -> DRError $ "Invalid URL: " ++ e
+    C.InvalidUrlException _ e
+        | e == "Invalid URL" -> DRError e
+        | otherwise -> DRError $ "Invalid URL: " ++ e
 
 httpExceptionContentToDR :: String -> C.HttpExceptionContent -> DownloadResult
 httpExceptionContentToDR url ec = case ec of
@@ -440,6 +456,7 @@ httpExceptionContentToDR url ec = case ec of
     C.ConnectionFailure e -> DRError $ "Connection failed: " ++ show e
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
     C.InvalidHeader h -> DRError $ "Invalid HTTP header:\n" ++ B.unpack h
+    C.InvalidRequestHeader h -> DRError $ "Invalid HTTP request header:\n" ++ B.unpack h
     C.InternalException e ->
         case show e of
             "<<timeout>>" -> DRError "Timeout"
