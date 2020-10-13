@@ -1,16 +1,16 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, RecordWildCards, ViewPatterns,
              DoAndIfThenElse, PatternGuards, ScopedTypeVariables,
              TupleSections #-}
-{-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
+{-# OPTIONS_GHC -fwarn-incomplete-patterns -fwarn-unused-imports #-}
 -- | HTTP downloader tailored for web-crawler needs.
 --
---  * Handles all possible http-conduit exceptions and returns
+--  * Handles all possible http-client exceptions and returns
 --    human readable error messages.
 --
 --  * Handles some web server bugs (returning @deflate@ data instead of @gzip@,
 --    invalid @gzip@ encoding).
 --
---  * Uses OpenSSL instead of @tls@ package (since @tls@ doesn't handle all sites).
+--  * Uses OpenSSL instead of @tls@ package (since @tls@ doesn't handle all sites and works slower than OpenSSL).
 --
 --  * Ignores invalid SSL sertificates.
 --
@@ -26,7 +26,7 @@
 --
 --  * Can be used with external DNS resolver (hsdns-cache for example).
 --
---  * Keep-alive connections pool (thanks to http-conduit).
+--  * Keep-alive connections pool (thanks to http-client).
 --
 --  Typical workflow in crawler:
 --
@@ -50,7 +50,7 @@
 -- It's highly recommended to use
 -- <http://hackage.haskell.org/package/concurrent-dns-cache>
 -- (preferably with single resolver pointing to locally running BIND)
--- for DNS resolution since @getAddrInfo@ used in @http-conduit@ can be
+-- for DNS resolution since @getAddrInfo@ used in @http-client@ can be
 -- buggy and ineffective when it needs to resolve many hosts per second for
 -- a long time.
 --
@@ -65,10 +65,9 @@ module Network.HTTP.Conduit.Downloader
     , Downloader, withDownloader, withDownloaderSettings, newDownloader
 
       -- * Utils
-    , postRequest, sinkByteString
+    , postRequest
     ) where
 
-import Control.Monad.Trans
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.ByteString.Char8 as B
@@ -82,19 +81,15 @@ import Data.Maybe
 import Data.List
 import Foreign
 import qualified Network.Socket as NS
--- import qualified Network.TLS as TLS
--- import qualified Network.Connection as NC
 import qualified OpenSSL as SSL
 import qualified OpenSSL.Session as SSL
 import qualified Network.HTTP.Types as N
-import qualified Network.HTTP.Conduit as C
-import Network.HTTP.Client.Internal (makeConnection, Connection)
-import qualified Control.Monad.Trans.Resource as C
-import qualified Data.Conduit as C
+import qualified Network.HTTP.Client as C
+import qualified Network.HTTP.Client.Internal as C
 import System.Timeout
 import Codec.Compression.Zlib.Raw as Deflate
 import Network.URI
--- import ADNS.Cache
+import System.IO.Unsafe
 import Data.Time.Format
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
@@ -149,91 +144,76 @@ instance Default DownloaderSettings where
         { dsUserAgent = "Mozilla/5.0 (compatible; HttpConduitDownloader/1.0; +http://hackage.haskell.org/package/http-conduit-downloader)"
         , dsTimeout = 30
         , dsManagerSettings =
-            C.tlsManagerSettings
-            { C.managerTlsConnection =
-              -- IO (Maybe HostAddress -> String -> Int -> IO Connection)
-              getOpenSSLConnection
+            C.defaultManagerSettings
+            { C.managerTlsConnection = getOpenSSLConnection
+            , C.managerTlsProxyConnection = getOpenSSLProxyConnection
+            , C.managerProxyInsecure = C.proxyFromRequest
+            , C.managerProxySecure = C.proxyFromRequest
             }
---             (C.mkManagerSettings tls Nothing)
---             { C.managerTlsConnection =
---               -- IO (Maybe HostAddress -> String -> Int -> IO Connection)
---               getTlsConnection (Just tls)
---             }
---             C.def { C.managerCheckCerts =
---                         \ _ _ _ -> return TLS.CertificateUsageAccept }
         , dsMaxDownloadSize = 10*1024*1024
         }
---        where tls = NC.TLSSettingsSimple True False False
 
 -- tls package doesn't handle some sites:
 -- https://github.com/vincenthz/hs-tls/issues/53
 -- using OpenSSL instead
+--
+-- Network.HTTP.Client.TLS.getTlsConnection with ability to use HostAddress
+-- since Network.Connection.connectTo uses Network.connectTo that uses
+-- getHostByName (passed HostAddress is ignored)
 getOpenSSLConnection :: IO (Maybe NS.HostAddress -> String -> Int
-                            -> IO Connection)
-getOpenSSLConnection = do
+                            -> IO C.Connection)
+getOpenSSLConnection =
+    return $ \ mbha host port -> do
+        let c sock = makeSSLConnection sock host
+        case mbha of
+            Nothing -> openSocketByName host port c
+            Just ha -> openSocket ha port c
+
+getOpenSSLProxyConnection :: IO (B.ByteString -> (C.Connection -> IO ()) -> String -> Maybe NS.HostAddress -> String -> Int -> IO C.Connection)
+getOpenSSLProxyConnection =
+    return $ \ connstr checkConn serverName _mbha host port -> do
+        openSocketByName host port $ \ sock -> do
+            sc <- C.socketConnection sock 8192
+            C.connectionWrite sc connstr
+            checkConn sc
+            makeSSLConnection sock serverName
+
+globalSSLContext :: SSL.SSLContext
+globalSSLContext = unsafePerformIO $ do
     ctx <- SSL.context
 --     SSL.contextSetCiphers ctx "DEFAULT"
 --     SSL.contextSetVerificationMode ctx SSL.VerifyNone
 --     SSL.contextAddOption ctx SSL.SSL_OP_NO_SSLv3
 --     SSL.contextAddOption ctx SSL.SSL_OP_ALL
-    return $ \ mbha host port -> do
-        sock <- case mbha of
-            Nothing -> openSocketByName host port
-            Just ha -> openSocket ha port
-        ssl <- SSL.connection ctx sock
-        SSL.setTlsextHostName ssl host
-        SSL.connect ssl
-        makeConnection
-            (SSL.read ssl bufSize
-             `E.catch`
-             \ (_ :: SSL.ConnectionAbruptlyTerminated) -> return ""
-            )
-            (SSL.write ssl)
-            -- Closing an SSL connection gracefully involves writing/reading
-            -- on the socket.  But when this is called the socket might be
-            -- already closed, and we get a @ResourceVanished@.
-            (NS.close sock `E.catch` \(_ :: E.IOException) -> return ())
---            ((SSL.shutdown ssl SSL.Bidirectional >> return ()) `E.catch` \(_ :: E.IOException) -> return ())
+    return ctx
+{-# NOINLINE globalSSLContext #-}
+
+makeSSLConnection :: NS.Socket -> String -> IO C.Connection
+makeSSLConnection sock host = do
+    ssl <- SSL.connection globalSSLContext sock
+    SSL.setTlsextHostName ssl host
+    SSL.connect ssl
+    C.makeConnection
+        (SSL.read ssl bufSize
+         `E.catch`
+         \ (_ :: SSL.ConnectionAbruptlyTerminated) -> return ""
+        )
+        (SSL.write ssl)
+        -- Closing an SSL connection gracefully involves writing/reading
+        -- on the socket.  But when this is called the socket might be
+        -- already closed, and we get a @ResourceVanished@.
+        (NS.close sock `E.catch` \(_ :: E.IOException) -> return ())
+--         ((SSL.shutdown ssl SSL.Bidirectional >> return ()) `E.catch` \(_ :: E.IOException) -> return ())
 -- segmentation fault in GHCi with SSL.shutdown / tryShutdown SSL.Unidirectional
 -- hang with SSL.Bidirectional
-
--- Network.HTTP.Client.TLS.getTlsConnection with ability to use HostAddress
--- since Network.Connection.connectTo uses Network.connectTo that uses
--- getHostByName (passed HostAddress is ignored)
--- getTlsConnection :: Maybe NC.TLSSettings
--- --                 -> Maybe NC.SockSettings
---                  -> IO (Maybe NS.HostAddress -> String -> Int -> IO Connection)
--- getTlsConnection tls = do
---     context <- NC.initConnectionContext
---     return $ \ mbha host port -> do
---         cf <- case mbha of
---             Nothing -> return $ NC.connectTo context
---             Just ha -> do
---                 sock <- openSocket ha port
---                 handle <- NS.socketToHandle sock ReadWriteMode
---                 return $ NC.connectFromHandle context handle
---         conn <- cf $ NC.ConnectionParams
---             { NC.connectionHostname = host
---             , NC.connectionPort = fromIntegral port
---             , NC.connectionUseSecure = tls
---             , NC.connectionUseSocks = Nothing -- sock
---             }
---         convertConnection conn
---   where
---     convertConnection conn = makeConnection
---         (NC.connectionGetChunk conn)
---         (NC.connectionPut conn)
---         -- Closing an SSL connection gracefully involves writing/reading
---         -- on the socket.  But when this is called the socket might be
---         -- already closed, and we get a @ResourceVanished@.
---         (NC.connectionClose conn `E.catch` \(_ :: E.IOException) -> return ())
 
 -- slightly modified Network.HTTP.Client.Connection.openSocketConnection
 openSocket :: NS.HostAddress
            -> Int -- ^ port
-           -> IO NS.Socket
-openSocket ha port =
-    openSocket' $
+           -> (NS.Socket -> IO a)
+           -> IO a
+openSocket ha port act =
+    openSocket'
         NS.AddrInfo
         { NS.addrFlags = []
         , NS.addrFamily = NS.AF_INET
@@ -242,8 +222,9 @@ openSocket ha port =
         , NS.addrAddress = NS.SockAddrInet (toEnum port) ha
         , NS.addrCanonName = Nothing
         }
-openSocket' :: NS.AddrInfo -> IO NS.Socket
-openSocket' addr = do
+        act
+openSocket' :: NS.AddrInfo -> (NS.Socket -> IO a) -> IO a
+openSocket' addr act = do
     E.bracketOnError
         (NS.socket (NS.addrFamily addr) (NS.addrSocketType addr)
                    (NS.addrProtocol addr))
@@ -251,10 +232,10 @@ openSocket' addr = do
         (\sock -> do
             NS.setSocketOption sock NS.NoDelay 1
             NS.connect sock (NS.addrAddress addr)
-            return sock)
+            act sock)
 
-openSocketByName :: Show a => NS.HostName -> a -> IO NS.Socket
-openSocketByName host port = do
+openSocketByName :: NS.HostName -> Int -> (NS.Socket -> IO a) -> IO a
+openSocketByName host port act = do
     let hints = NS.defaultHints
                 { NS.addrFlags = []-- [NS.AI_ADDRCONFIG, NS.AI_NUMERICSERV]
                 , NS.addrFamily = NS.AF_INET
@@ -262,9 +243,9 @@ openSocketByName host port = do
                 , NS.addrProtocol = 6 -- tcp
                 }
     (addrInfo:_) <- NS.getAddrInfo (Just hints) (Just host) (Just $ show port)
-    openSocket' addrInfo
+    openSocket' addrInfo act
 
--- | Keeps http-conduit 'Manager' and 'DownloaderSettings'.
+-- | Keeps http-client 'Manager' and 'DownloaderSettings'.
 data Downloader
     = Downloader
       { manager :: C.Manager
@@ -312,9 +293,8 @@ postRequest dat rq =
        , C.requestBody = C.RequestBodyBS dat }
 
 -- | Generic version of 'download'
--- with ability to modify http-conduit 'Request'.
-downloadG :: -- m ~ C.ResourceT IO
-                (C.Request -> C.ResourceT IO C.Request)
+-- with ability to modify http-client 'Request'.
+downloadG ::    (C.Request -> IO C.Request)
                 -- ^ Function to modify 'Request'
                 -- (e.g. sign or make 'postRequest')
              -> Downloader
@@ -327,8 +307,7 @@ downloadG f d u h o = fmap fst $ rawDownload f d u h o
 -- | Even more generic version of 'download', which returns 'RawDownloadResult'.
 -- 'RawDownloadResult' is optional since it can not be determined on timeouts
 -- and connection errors.
-rawDownload :: -- m ~ C.ResourceT IO
-                (C.Request -> C.ResourceT IO C.Request)
+rawDownload ::  (C.Request -> IO C.Request)
                 -- ^ Function to modify 'Request'
                 -- (e.g. sign or make 'postRequest')
              -> Downloader
@@ -344,8 +323,7 @@ rawDownload f (Downloader {..}) url hostAddress opts =
               (E.fromException e)
     Right rq -> do
         let dl req firstTime = do
-                r <- (timeout (dsTimeout settings * 1000000) $ C.runResourceT $ do
-                    r <- C.http req manager
+                r <- (timeout (dsTimeout settings * 1000000) $ C.withResponse req manager $ \ r -> do
                     let s = C.responseStatus r
                         h = C.responseHeaders r
                         rdr d =
@@ -367,13 +345,13 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                return Nothing
                                -- no reason to download body
                         _ ->
-                            C.sealConduitT (C.responseBody r) C.$$+-
-                                sinkByteString (dsMaxDownloadSize settings)
+                            sinkByteString (C.brRead $ C.responseBody r)
+                                (dsMaxDownloadSize settings)
 --                    liftIO $ print ("sink", mbb)
                     case mbb of
                         Just b -> do
                             let d = tryDeflate h b
-                            curTime <- liftIO $ getCurrentTime
+                            curTime <- getCurrentTime
                             return
                                 (makeDownloadResultC curTime url s h d
                                 , Just $ rdr d)
@@ -417,12 +395,12 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                      , C.redirectCount = 0
                      , C.responseTimeout = C.responseTimeoutNone
                        -- We have timeout for connect and downloading
-                       -- while http-conduit timeouts only when waits for
+                       -- while http-client timeouts only when waits for
                        -- headers.
                      , C.hostAddress = hostAddress
                      , C.checkResponse = \ _ _ -> return ()
                      }
-        req <- C.runResourceT $ f rq1
+        req <- f rq1
         dl req True
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
@@ -508,22 +486,21 @@ addBs acc (B.PS bfp _ bl) (B.PS sfp offs sl) = do
 
 -- | Sink data using 32k buffers to reduce memory fragmentation.
 -- Returns 'Nothing' if downloaded too much data.
-sinkByteString :: MonadIO m => Int -> C.ConduitT B.ByteString C.Void m (Maybe B.ByteString)
-sinkByteString limit = do
-    buf <- liftIO $ newBuf
+sinkByteString :: IO B.ByteString -> Int -> IO (Maybe B.ByteString)
+sinkByteString readChunk limit = do
+    buf <- newBuf
     go 0 [] buf
     where go len acc buf = do
-              mbinp <- C.await
-              case mbinp of
-                  Just inp -> do
-                      (acc', buf') <- liftIO $ addBs acc buf inp
-                      let len' = len + B.length inp
-                      if len' > limit then
-                          return Nothing
-                      else
-                          go len' acc' buf'
-                  Nothing -> do
-                      return $ Just $ B.concat $ reverse (buf:acc)
+              inp <- readChunk
+              if B.null inp then
+                  return $ Just $ B.concat $ reverse (buf:acc)
+              else do
+                  (acc', buf') <- addBs acc buf inp
+                  let len' = len + B.length inp
+                  if len' > limit then
+                      return Nothing
+                  else
+                      go len' acc' buf'
 
 makeDownloadResultC :: UTCTime -> String -> N.Status -> N.ResponseHeaders
                     -> B.ByteString -> DownloadResult
@@ -604,11 +581,15 @@ parseHttpTime =
     ,"%a %b %e %k:%M:%S %Y"     -- Sun Nov  6 08:49:37 1994
     ]
 
+globalDownloader :: Downloader
+globalDownloader = unsafePerformIO $ newDownloader def
+{-# NOINLINE globalDownloader #-}
+
 -- | Download single URL with default 'DownloaderSettings'.
 -- Fails if result is not 'DROK'.
 urlGetContents :: String -> IO B.ByteString
-urlGetContents url = withDownloader $ \ d -> do
-    r <- download d url Nothing []
+urlGetContents url = do
+    r <- download globalDownloader url Nothing []
     case r of
         DROK c _ -> return c
         e -> fail $ "urlGetContents " ++ show url ++ ": " ++ show e
@@ -616,8 +597,8 @@ urlGetContents url = withDownloader $ \ d -> do
 -- | Post data and download single URL with default 'DownloaderSettings'.
 -- Fails if result is not 'DROK'.
 urlGetContentsPost :: String -> B.ByteString -> IO B.ByteString
-urlGetContentsPost url dat = withDownloader $ \ d -> do
-    r <- post d url Nothing dat
+urlGetContentsPost url dat = do
+    r <- post globalDownloader url Nothing dat
     case r of
         DROK c _ -> return c
         e -> fail $ "urlGetContentsPost " ++ show url ++ ": " ++ show e

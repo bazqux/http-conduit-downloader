@@ -1,6 +1,6 @@
 cabal-version:  >= 1.6
 name:           http-conduit-downloader
-version:        1.0.34
+version:        1.1.0
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
 homepage:       https://github.com/bazqux/http-conduit-downloader
@@ -10,16 +10,20 @@ license-file:   LICENSE
 build-type:     Simple
 synopsis:       HTTP downloader tailored for web-crawler needs.
 description:
-    HTTP/HTTPS downloader built on top of @http-conduit@
+    HTTP/HTTPS downloader built on top of @http-client@
     and used in <https://bazqux.com> crawler.
     .
-     * Handles all possible http-conduit exceptions and returns
+    Previously it was based on @http-conduit@ (hence the name) but since
+    all the necessary parts are in @http-client@ now @http-conduit@ is no
+    longer used.
+    .
+     * Handles all possible http-client exceptions and returns
        human readable error messages.
     .
      * Handles some web server bugs (returning 'deflate' data instead of 'gzip',
        invalid 'gzip' encoding).
     .
-     * Uses OpenSSL instead of 'tls' package (since 'tls' doesn't handle all sites).
+     * Uses OpenSSL instead of 'tls' package (since 'tls' doesn't handle all sites and works slower than OpenSSL).
     .
      * Ignores invalid SSL sertificates.
     .
@@ -33,7 +37,7 @@ description:
      * Returns HTTP headers for subsequent redownloads and handles
        'Not modified' results.
     .
-     * Can be used with external DNS resolver (e.g. concurrent-dns-cache).
+     * Can be used with external DNS resolver (e.g. @concurrent-dns-cache@).
 
 source-repository head
     type:     git
@@ -42,10 +46,9 @@ source-repository head
 library
     build-depends:
         base == 4.*,
-        http-conduit >= 2.3.7 && < 2.4.0,
         http-client >= 0.7.0 && < 0.8.0,
-        connection, zlib,
-        conduit, resourcet, http-types, data-default, bytestring, text, mtl,
+        zlib,
+        http-types, data-default, bytestring, text,
         time >= 1.5.0, HsOpenSSL >= 0.11.2, network-uri >= 2.6, network >= 2.6
 
     exposed-modules:
