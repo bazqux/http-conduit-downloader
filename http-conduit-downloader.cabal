@@ -1,10 +1,10 @@
-cabal-version:  >= 1.6
+cabal-version:  2.4
 name:           http-conduit-downloader
 version:        1.1.0
 author:         Vladimir Shabanov <vshabanoff@gmail.com>
 maintainer:     Vladimir Shabanov <vshabanoff@gmail.com>
 homepage:       https://github.com/bazqux/http-conduit-downloader
-license:        BSD3
+license:        BSD-3-Clause
 category:       Web
 license-file:   LICENSE
 build-type:     Simple
@@ -44,6 +44,7 @@ source-repository head
     location: https://github.com/bazqux/http-conduit-downloader
 
 library
+    default-language: Haskell2010
     build-depends:
         base == 4.*,
         http-client >= 0.7.0 && < 0.8.0,
