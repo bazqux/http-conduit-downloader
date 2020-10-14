@@ -513,6 +513,7 @@ makeDownloadResultC curTime url c headers b = do
           , 302 -- Found
           , 303 -- See other
           , 307 -- Temporary redirect
+          , 308 -- Permanent redirect
           ] then
         case lookup "location" headers of
             Just (B.unpack -> loc) ->
