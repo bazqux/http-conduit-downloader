@@ -81,6 +81,7 @@ import Data.Maybe
 import Data.List
 import Foreign
 import qualified Network.Socket as NS
+import qualified Network.Socket.ByteString as NS
 import qualified OpenSSL as SSL
 import qualified OpenSSL.Session as SSL
 import qualified Network.HTTP.Types as N
@@ -173,7 +174,12 @@ getOpenSSLProxyConnection :: IO (B.ByteString -> (C.Connection -> IO ()) -> Stri
 getOpenSSLProxyConnection =
     return $ \ connstr checkConn serverName _mbha host port -> do
         openSocketByName host port $ \ sock -> do
-            sc <- C.socketConnection sock 8192
+            sc <- C.makeConnection
+                (NS.recv sock 8129)
+                (NS.sendAll sock)
+                (return ())
+                -- No NS.close since C.makeConnection creates finalizer which
+                -- calls it prematurely since sc is never used after checkConn.
             C.connectionWrite sc connstr
             checkConn sc
             makeSSLConnection sock serverName
