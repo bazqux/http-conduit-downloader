@@ -47,10 +47,11 @@ library
     default-language: Haskell2010
     build-depends:
         base == 4.*,
-        http-client >= 0.7.0 && < 0.8.0,
+        http-client == 0.7.*,
+        http-client-openssl == 0.3.2.*,
         zlib,
         http-types, data-default, bytestring, text,
-        time >= 1.5.0, HsOpenSSL >= 0.11.2, network-uri >= 2.6, network >= 2.6
+        time >= 1.5.0, HsOpenSSL >= 0.11.5, network-uri >= 2.6, network >= 2.6
 
     exposed-modules:
         Network.HTTP.Conduit.Downloader

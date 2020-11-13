@@ -81,13 +81,13 @@ import Data.Maybe
 import Data.List
 import Foreign
 import qualified Network.Socket as NS
-import qualified Network.Socket.ByteString as NS
+
 import qualified OpenSSL as SSL
 import qualified OpenSSL.Session as SSL
 import qualified Network.HTTP.Types as N
 import qualified Network.HTTP.Client as C
 import qualified Network.HTTP.Client.Internal as C
-import System.Timeout
+import qualified Network.HTTP.Client.OpenSSL as C
 import Codec.Compression.Zlib.Raw as Deflate
 import Network.URI
 import System.IO.Unsafe
@@ -145,10 +145,8 @@ instance Default DownloaderSettings where
         { dsUserAgent = "Mozilla/5.0 (compatible; HttpConduitDownloader/1.0; +http://hackage.haskell.org/package/http-conduit-downloader)"
         , dsTimeout = 30
         , dsManagerSettings =
-            C.defaultManagerSettings
-            { C.managerTlsConnection = getOpenSSLConnection
-            , C.managerTlsProxyConnection = getOpenSSLProxyConnection
-            , C.managerProxyInsecure = C.proxyFromRequest
+            (C.opensslManagerSettings $ return globalSSLContext)
+            { C.managerProxyInsecure = C.proxyFromRequest
             , C.managerProxySecure = C.proxyFromRequest
             }
         , dsMaxDownloadSize = 10*1024*1024
@@ -156,33 +154,8 @@ instance Default DownloaderSettings where
 
 -- tls package doesn't handle some sites:
 -- https://github.com/vincenthz/hs-tls/issues/53
+-- plus tls is about 2 times slower than HsOpenSSL
 -- using OpenSSL instead
---
--- Network.HTTP.Client.TLS.getTlsConnection with ability to use HostAddress
--- since Network.Connection.connectTo uses Network.connectTo that uses
--- getHostByName (passed HostAddress is ignored)
-getOpenSSLConnection :: IO (Maybe NS.HostAddress -> String -> Int
-                            -> IO C.Connection)
-getOpenSSLConnection =
-    return $ \ mbha host port -> do
-        let c sock = makeSSLConnection sock host
-        case mbha of
-            Nothing -> openSocketByName host port c
-            Just ha -> openSocket ha port c
-
-getOpenSSLProxyConnection :: IO (B.ByteString -> (C.Connection -> IO ()) -> String -> Maybe NS.HostAddress -> String -> Int -> IO C.Connection)
-getOpenSSLProxyConnection =
-    return $ \ connstr checkConn serverName _mbha host port -> do
-        openSocketByName host port $ \ sock -> do
-            sc <- C.makeConnection
-                (NS.recv sock 8129)
-                (NS.sendAll sock)
-                (return ())
-                -- No NS.close since C.makeConnection creates finalizer which
-                -- calls it prematurely since sc is never used after checkConn.
-            C.connectionWrite sc connstr
-            checkConn sc
-            makeSSLConnection sock serverName
 
 globalSSLContext :: SSL.SSLContext
 globalSSLContext = unsafePerformIO $ do
@@ -193,63 +166,6 @@ globalSSLContext = unsafePerformIO $ do
 --     SSL.contextAddOption ctx SSL.SSL_OP_ALL
     return ctx
 {-# NOINLINE globalSSLContext #-}
-
-makeSSLConnection :: NS.Socket -> String -> IO C.Connection
-makeSSLConnection sock host = do
-    ssl <- SSL.connection globalSSLContext sock
-    SSL.setTlsextHostName ssl host
-    SSL.connect ssl
-    C.makeConnection
-        (SSL.read ssl bufSize
-         `E.catch`
-         \ (_ :: SSL.ConnectionAbruptlyTerminated) -> return ""
-        )
-        (SSL.write ssl)
-        -- Closing an SSL connection gracefully involves writing/reading
-        -- on the socket.  But when this is called the socket might be
-        -- already closed, and we get a @ResourceVanished@.
-        (NS.close sock `E.catch` \(_ :: E.IOException) -> return ())
---         ((SSL.shutdown ssl SSL.Bidirectional >> return ()) `E.catch` \(_ :: E.IOException) -> return ())
--- segmentation fault in GHCi with SSL.shutdown / tryShutdown SSL.Unidirectional
--- hang with SSL.Bidirectional
-
--- slightly modified Network.HTTP.Client.Connection.openSocketConnection
-openSocket :: NS.HostAddress
-           -> Int -- ^ port
-           -> (NS.Socket -> IO a)
-           -> IO a
-openSocket ha port act =
-    openSocket'
-        NS.AddrInfo
-        { NS.addrFlags = []
-        , NS.addrFamily = NS.AF_INET
-        , NS.addrSocketType = NS.Stream
-        , NS.addrProtocol = 6 -- tcp
-        , NS.addrAddress = NS.SockAddrInet (toEnum port) ha
-        , NS.addrCanonName = Nothing
-        }
-        act
-openSocket' :: NS.AddrInfo -> (NS.Socket -> IO a) -> IO a
-openSocket' addr act = do
-    E.bracketOnError
-        (NS.socket (NS.addrFamily addr) (NS.addrSocketType addr)
-                   (NS.addrProtocol addr))
-        (NS.close)
-        (\sock -> do
-            NS.setSocketOption sock NS.NoDelay 1
-            NS.connect sock (NS.addrAddress addr)
-            act sock)
-
-openSocketByName :: NS.HostName -> Int -> (NS.Socket -> IO a) -> IO a
-openSocketByName host port act = do
-    let hints = NS.defaultHints
-                { NS.addrFlags = []-- [NS.AI_ADDRCONFIG, NS.AI_NUMERICSERV]
-                , NS.addrFamily = NS.AF_INET
-                , NS.addrSocketType = NS.Stream
-                , NS.addrProtocol = 6 -- tcp
-                }
-    (addrInfo:_) <- NS.getAddrInfo (Just hints) (Just host) (Just $ show port)
-    openSocket' addrInfo act
 
 -- | Keeps http-client 'Manager' and 'DownloaderSettings'.
 data Downloader
@@ -329,7 +245,8 @@ rawDownload f (Downloader {..}) url hostAddress opts =
               (E.fromException e)
     Right rq -> do
         let dl req firstTime = do
-                r <- (timeout (dsTimeout settings * 1000000) $ C.withResponse req manager $ \ r -> do
+                r <- E.handle (fmap (, Nothing) . httpExceptionToDR url) $
+                    C.withResponse req manager $ \ r -> do
                     let s = C.responseStatus r
                         h = C.responseHeaders r
                         rdr d =
@@ -353,7 +270,6 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                         _ ->
                             sinkByteString (C.brRead $ C.responseBody r)
                                 (dsMaxDownloadSize settings)
---                    liftIO $ print ("sink", mbb)
                     case mbb of
                         Just b -> do
                             let d = tryDeflate h b
@@ -362,33 +278,15 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                 (makeDownloadResultC curTime url s h d
                                 , Just $ rdr d)
                         Nothing ->
-                            return (DRError "Too much data", Just $ rdr ""))
-                  `E.catch`
-                    (fmap (Just . (, Nothing)) . httpExceptionToDR url)
---                   `E.catch`
---                     (return . Just . handshakeFailed)
-                  `E.catch`
-                    (return . (Just . (, Nothing)) . someException)
+                            return (DRError "Too much data", Just $ rdr "")
                 case r of
-                    Just (DRError e, _)
-                        | ("EOF reached" `isSuffixOf` e
-                           || e == "Invalid HTTP status line:\n"
-                           || e == "Incomplete headers"
-                          ) && firstTime ->
-                            dl req False
-                        -- "EOF reached" or empty HTTP status line
-                        -- can happen on servers that fails to
-                        -- implement HTTP/1.1 persistent connections.
-                        -- Try again
-                        -- https://github.com/snoyberg/http-conduit/issues/89
-                        -- Fixed in
-                        -- https://github.com/snoyberg/http-conduit/issues/117
+                    (DRError e, _)
                         | "ZlibException" `isPrefixOf` e && firstTime ->
                             -- some sites return junk instead of gzip data.
                             -- retrying without compression
                             dl (disableCompression req) False
                     _ ->
-                        return $ fromMaybe (DRError "Timeout", Nothing) r
+                        return r
             disableCompression req =
                 req { C.requestHeaders =
                           ("Accept-Encoding", "") : C.requestHeaders req }
@@ -399,10 +297,8 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                ++ map toHeader opts
                                ++ C.requestHeaders rq
                      , C.redirectCount = 0
-                     , C.responseTimeout = C.responseTimeoutNone
-                       -- We have timeout for connect and downloading
-                       -- while http-client timeouts only when waits for
-                       -- headers.
+                     , C.responseTimeout =
+                         C.responseTimeoutMicro $ dsTimeout settings * 1000000
                      , C.hostAddress = hostAddress
                      , C.checkResponse = \ _ _ -> return ()
                      }
@@ -411,10 +307,6 @@ rawDownload f (Downloader {..}) url hostAddress opts =
     where toHeader :: String -> N.Header
           toHeader h = let (a,b) = break (== ':') h in
                        (fromString a, fromString (tail b))
-          someException :: E.SomeException -> DownloadResult
-          someException e = case show e of
-              "<<timeout>>" -> DRError "Timeout"
-              s -> DRError s
           tryDeflate headers b
               | Just d <- lookup "Content-Encoding" headers
               , B.map toLower d == "deflate"
@@ -435,17 +327,20 @@ httpExceptionContentToDR url ec = case ec of
       (C.responseStatus r) (C.responseHeaders r) b
     C.TooManyRedirects _ -> DRError "Too many redirects"
     C.OverlongHeaders -> DRError "Overlong HTTP headers"
-    C.ResponseTimeout -> DRError "Timeout"
+    C.ResponseTimeout -> DRError "Response timeout"
     C.ConnectionTimeout -> DRError "Connection timeout"
     C.ConnectionFailure e -> DRError $ "Connection failed: " ++ show e
     C.InvalidStatusLine l -> DRError $ "Invalid HTTP status line:\n" ++ B.unpack l
     C.InvalidHeader h -> DRError $ "Invalid HTTP header:\n" ++ B.unpack h
     C.InvalidRequestHeader h -> DRError $ "Invalid HTTP request header:\n" ++ B.unpack h
-    C.InternalException e ->
-        case show e of
-            "<<timeout>>" -> DRError "Timeout"
-            s -> DRError s
-    C.ProxyConnectException _ _ _ -> DRError "Can't connect to proxy"
+    C.InternalException e
+        | Just (_ :: SSL.ConnectionAbruptlyTerminated) <- E.fromException e ->
+            DRError "Connection abruptly terminated"
+        | Just (SSL.ProtocolError pe) <- E.fromException e ->
+            DRError $ "SSL protocol error: " <> pe
+        | otherwise -> DRError $ show e
+    C.ProxyConnectException _ _ s ->
+        DRError $ "Proxy CONNECT failed: " ++ httpStatusString s
     C.NoResponseDataReceived -> DRError "No response data received"
     C.TlsNotSupported -> DRError "TLS not supported"
     C.WrongRequestBodyStreamSize e a ->
@@ -531,8 +426,7 @@ makeDownloadResultC curTime url c headers b = do
                     ++ B.unpack (N.statusMessage c) ++ "\n"
                     ++ unlines (map show headers)
     else if N.statusCode c >= 300 then
-        DRError $ "HTTP " ++ show (N.statusCode c) ++ " "
-                    ++ B.unpack (N.statusMessage c)
+        DRError $ httpStatusString c
     else
         DROK b (redownloadOpts [] headers)
     where redirect r
@@ -569,7 +463,9 @@ makeDownloadResultC curTime url c headers b = do
                   (parseURIReference r)
                   (parseURI $ fixNonAscii url)
 
--- fmap utcTimeToPOSIXSeconds $
+httpStatusString :: N.Status -> [Char]
+httpStatusString c =
+    "HTTP " ++ show (N.statusCode c) ++ " " ++ B.unpack (N.statusMessage c)
 
 tryParseTime :: [String] -> String -> Maybe UTCTime
 tryParseTime formats string =
