@@ -94,6 +94,7 @@ import System.IO.Unsafe
 import Data.Time.Format
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
+import System.Timeout
 
 -- | Result of 'download' operation.
 data DownloadResult
@@ -245,6 +246,7 @@ rawDownload f (Downloader {..}) url hostAddress opts =
               (E.fromException e)
     Right rq -> do
         let dl req firstTime = do
+                t0 <- getCurrentTime
                 r <- E.handle (fmap (, Nothing) . httpExceptionToDR url) $
                     C.withResponse req manager $ \ r -> do
                     let s = C.responseStatus r
@@ -267,17 +269,27 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                -- liftIO $ putStrLn "Content-Length too large"
                                return Nothing
                                -- no reason to download body
-                        _ ->
-                            sinkByteString (C.brRead $ C.responseBody r)
-                                (dsMaxDownloadSize settings)
+                        _ -> do
+                            t1 <- getCurrentTime
+                            let timeSpentMicro = diffUTCTime t1 t0 * 1000000
+                                remainingTime =
+                                    round $ fromIntegral to - timeSpentMicro
+                            if remainingTime <= 0 then
+                                return Nothing
+                            else
+                                timeout remainingTime
+                                $ sinkByteString (C.brRead $ C.responseBody r)
+                                    (dsMaxDownloadSize settings)
                     case mbb of
-                        Just b -> do
+                        Nothing ->
+                            return (DRError "Timeout", Just $ rdr "")
+                        Just (Just b) -> do
                             let d = tryDeflate h b
                             curTime <- getCurrentTime
                             return
                                 (makeDownloadResultC curTime url s h d
                                 , Just $ rdr d)
-                        Nothing ->
+                        Just Nothing ->
                             return (DRError "Too much data", Just $ rdr "")
                 case r of
                     (DRError e, _)
@@ -297,11 +309,13 @@ rawDownload f (Downloader {..}) url hostAddress opts =
                                ++ map toHeader opts
                                ++ C.requestHeaders rq
                      , C.redirectCount = 0
-                     , C.responseTimeout =
-                         C.responseTimeoutMicro $ dsTimeout settings * 1000000
+                     , C.responseTimeout = C.responseTimeoutMicro to
+                       -- it's only connection + headers timeout,
+                       -- response body needs additional timeout
                      , C.hostAddress = hostAddress
                      , C.checkResponse = \ _ _ -> return ()
                      }
+            to = dsTimeout settings * 1000000
         req <- f rq1
         dl req True
     where toHeader :: String -> N.Header
