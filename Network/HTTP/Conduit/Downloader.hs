@@ -149,6 +149,7 @@ instance Default DownloaderSettings where
             (C.opensslManagerSettings $ return globalSSLContext)
             { C.managerProxyInsecure = C.proxyFromRequest
             , C.managerProxySecure = C.proxyFromRequest
+            , C.managerMaxHeaderLength = Just $ C.MaxHeaderLength 65536
             }
         , dsMaxDownloadSize = 10*1024*1024
         }
